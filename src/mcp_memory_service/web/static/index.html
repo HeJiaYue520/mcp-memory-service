@@ -6,8 +6,8 @@
     <title data-i18n="meta.title">MCP Memory Service - Dashboard</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
-    <!-- Chart.js for quality analytics visualizations -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Chart.js for quality analytics visualizations (local copy) -->
+    <script src="/static/chart.umd.min.js"></script>
 </head>
 <body>
     <!-- Main Application Container -->
@@ -1303,6 +1303,27 @@
                             <div class="backup-actions">
                                 <button id="backupNowButton" class="btn btn-sm btn-primary" data-i18n="modal.settings.backupNow">Create Backup Now</button>
                                 <button id="viewBackupsButton" class="btn btn-sm btn-secondary" data-i18n="modal.settings.viewBackups">View Backups</button>
+                            </div>
+                        </div>
+
+                        <hr class="settings-divider">
+
+                        <h4 class="settings-section-heading" data-i18n="modal.settings.authentication">Authentication</h4>
+                        <div class="auth-settings">
+                            <!-- Hidden username field for accessibility (password forms should have username fields) -->
+                            <input type="text" name="username" style="display:none" autocomplete="username" tabindex="-1">
+                            <div class="form-group">
+                                <label for="apiKeyInput" data-i18n="modal.settings.apiKey">API Key</label>
+                                <input type="password" id="apiKeyInput" name="password" class="form-input" placeholder="Enter your API key for multi-device access" autocomplete="new-password">
+                                <small class="form-text" data-i18n="modal.settings.apiKeyHelp">
+                                    Leave empty for local-only access. Use the same API key on multiple devices to share memories.
+                                </small>
+                            </div>
+                            <div class="setting-item">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="rememberApiKey">
+                                    <span data-i18n="modal.settings.rememberApiKey">Remember API Key</span>
+                                </label>
                             </div>
                         </div>
                     </form>

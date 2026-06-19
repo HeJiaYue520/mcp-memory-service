@@ -80,7 +80,8 @@ class MemoryDashboard {
         this.settings = {
             theme: 'light',
             viewDensity: 'comfortable',
-            previewLines: 3
+            previewLines: 3,
+            apiKey: ''
         };
 
         // Documents upload state
@@ -573,7 +574,12 @@ class MemoryDashboard {
      */
     setupSSE() {
         try {
-            this.eventSource = new EventSource(`${this.apiBase}/events`);
+            // Build SSE URL with API key if configured (EventSource doesn't support custom headers)
+            let eventsUrl = `${this.apiBase}/events`;
+            if (this.settings.apiKey) {
+                eventsUrl += `?token=${encodeURIComponent(this.settings.apiKey)}`;
+            }
+            this.eventSource = new EventSource(eventsUrl);
 
             this.eventSource.onopen = () => {
                 this.updateConnectionStatus('connected');
@@ -1252,7 +1258,7 @@ class MemoryDashboard {
         formData.append('chunk_overlap', config.chunk_overlap.toString());
         formData.append('memory_type', config.memory_type);
 
-        const response = await fetch(`${this.apiBase}/documents/upload`, {
+        const response = await this.fetchWithAuth(`${this.apiBase}/documents/upload`, {
             method: 'POST',
             body: formData
         });
@@ -1303,7 +1309,7 @@ class MemoryDashboard {
         formData.append('chunk_overlap', config.chunk_overlap.toString());
         formData.append('memory_type', config.memory_type);
 
-        const response = await fetch(`${this.apiBase}/documents/batch-upload`, {
+        const response = await this.fetchWithAuth(`${this.apiBase}/documents/batch-upload`, {
             method: 'POST',
             body: formData
         });
@@ -3239,12 +3245,12 @@ class MemoryDashboard {
      * Generic API call wrapper
      */
     async apiCall(endpoint, method = 'GET', data = null) {
-        const options = {
+        const options = this.getAuthOptions({
             method: method,
             headers: {
                 'Content-Type': 'application/json',
             }
-        };
+        });
 
         if (data) {
             options.body = JSON.stringify(data);
@@ -3537,9 +3543,45 @@ class MemoryDashboard {
             if (saved) {
                 this.settings = { ...this.settings, ...JSON.parse(saved) };
             }
+
+            // Load API key from separate storage (for security)
+            const apiKey = localStorage.getItem('memoryDashboardApiKey');
+            if (apiKey) {
+                this.settings.apiKey = apiKey;
+            }
         } catch (error) {
             console.warn('Failed to load settings:', error);
         }
+    }
+
+    /**
+     * Get authenticated fetch options
+     * @param {Object} options - Additional fetch options
+     * @returns {Object} Fetch options with Authorization header if API key is set
+     */
+    getAuthOptions(options = {}) {
+        const authOptions = { ...options };
+
+        // Add Authorization header if API key is set
+        if (this.settings.apiKey) {
+            authOptions.headers = {
+                ...(authOptions.headers || {}),
+                'Authorization': `Bearer ${this.settings.apiKey}`
+            };
+        }
+
+        return authOptions;
+    }
+
+    /**
+     * Fetch with authentication
+     * @param {string} url - URL to fetch
+     * @param {Object} options - Fetch options
+     * @returns {Promise<Response>} Fetch response
+     */
+    async fetchWithAuth(url, options = {}) {
+        const authOptions = this.getAuthOptions(options);
+        return await fetch(url, authOptions);
     }
 
     /**
@@ -3634,6 +3676,10 @@ class MemoryDashboard {
         document.getElementById('themeSelect').value = this.settings.theme;
         document.getElementById('viewDensity').value = this.settings.viewDensity;
         document.getElementById('previewLines').value = this.settings.previewLines;
+
+        // Load API key
+        document.getElementById('apiKeyInput').value = this.settings.apiKey || '';
+        document.getElementById('rememberApiKey').checked = localStorage.getItem('memoryDashboardApiKey') !== null;
 
         // Reset system info to loading state
         this.resetSystemInfoLoadingState();
@@ -3747,11 +3793,21 @@ class MemoryDashboard {
         const theme = document.getElementById('themeSelect').value;
         const viewDensity = document.getElementById('viewDensity').value;
         const previewLines = parseInt(document.getElementById('previewLines').value, 10);
+        const apiKey = document.getElementById('apiKeyInput').value.trim();
+        const rememberApiKey = document.getElementById('rememberApiKey').checked;
 
         // Update settings
         this.settings.theme = theme;
         this.settings.viewDensity = viewDensity;
         this.settings.previewLines = previewLines;
+        this.settings.apiKey = apiKey;
+
+        // Handle API key storage
+        if (rememberApiKey && apiKey) {
+            localStorage.setItem('memoryDashboardApiKey', apiKey);
+        } else {
+            localStorage.removeItem('memoryDashboardApiKey');
+        }
 
         // Apply changes
         this.applyTheme(theme);
@@ -3783,7 +3839,7 @@ class MemoryDashboard {
      */
     async loadTagSelectOptions() {
         try {
-            const response = await fetch(`${this.apiBase}/manage/tags/stats`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/manage/tags/stats`);
             if (!response.ok) throw new Error('Failed to load tags');
 
             const data = await response.json();
@@ -3816,7 +3872,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/manage/tags/stats`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/manage/tags/stats`);
             if (!response.ok) throw new Error('Failed to load tag stats');
 
             const data = await response.json();
@@ -3893,7 +3949,7 @@ class MemoryDashboard {
 
         this.setLoading(true);
         try {
-            const response = await fetch(`${this.apiBase}/manage/bulk-delete`, {
+            const response = await this.fetchWithAuth(`${this.apiBase}/manage/bulk-delete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3928,7 +3984,7 @@ class MemoryDashboard {
 
         this.setLoading(true);
         try {
-            const response = await fetch(`${this.apiBase}/manage/cleanup-duplicates`, {
+            const response = await this.fetchWithAuth(`${this.apiBase}/manage/cleanup-duplicates`, {
                 method: 'POST'
             });
 
@@ -3966,7 +4022,7 @@ class MemoryDashboard {
 
         this.setLoading(true);
         try {
-            const response = await fetch(`${this.apiBase}/manage/bulk-delete`, {
+            const response = await this.fetchWithAuth(`${this.apiBase}/manage/bulk-delete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -4053,7 +4109,7 @@ class MemoryDashboard {
      */
     async loadAnalyticsOverview() {
         try {
-            const response = await fetch(`${this.apiBase}/analytics/overview`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/overview`);
             if (!response.ok) throw new Error('Failed to load overview');
 
             const data = await response.json();
@@ -4079,7 +4135,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/analytics/memory-growth?period=${period}`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/memory-growth?period=${period}`);
             if (!response.ok) throw new Error('Failed to load growth data');
 
             const data = await response.json();
@@ -4132,7 +4188,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/analytics/tag-usage`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/tag-usage`);
             if (!response.ok) throw new Error('Failed to load tag usage');
 
             const data = await response.json();
@@ -4192,7 +4248,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/analytics/memory-types`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/memory-types`);
             if (!response.ok) throw new Error('Failed to load memory types');
 
             const data = await response.json();
@@ -4254,7 +4310,7 @@ class MemoryDashboard {
         if (!container) return;
 
     try {
-    const response = await fetch(`${this.apiBase}/analytics/top-tags?period=${period}`);
+    const response = await this.fetchWithAuth(`${this.apiBase}/analytics/top-tags?period=${period}`);
             if (!response.ok) throw new Error('Failed to load top tags');
 
     const data = await response.json();
@@ -4306,7 +4362,7 @@ class MemoryDashboard {
         if (!container) return;
 
     try {
-    const response = await fetch(`${this.apiBase}/analytics/activity-breakdown?granularity=${granularity}`);
+    const response = await this.fetchWithAuth(`${this.apiBase}/analytics/activity-breakdown?granularity=${granularity}`);
     if (!response.ok) throw new Error('Failed to load activity breakdown');
 
     const data = await response.json();
@@ -4375,7 +4431,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/analytics/activity-heatmap?days=${period}`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/activity-heatmap?days=${period}`);
             if (!response.ok) throw new Error('Failed to load heatmap data');
 
             const data = await response.json();
@@ -4485,7 +4541,7 @@ class MemoryDashboard {
         if (!container) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/analytics/storage-stats`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/analytics/storage-stats`);
             if (!response.ok) throw new Error('Failed to load storage stats');
 
             const data = await response.json();
@@ -4545,7 +4601,7 @@ class MemoryDashboard {
      */
     async loadQualityAnalytics() {
         try {
-            const response = await fetch(`${this.apiBase}/quality/distribution`);
+            const response = await this.fetchWithAuth(`${this.apiBase}/quality/distribution`);
             if (!response.ok) throw new Error('Failed to load quality analytics');
 
             const data = await response.json();
@@ -4788,7 +4844,7 @@ class MemoryDashboard {
      */
     async rateMemory(contentHash, rating) {
         try {
-            const response = await fetch(`${this.apiBase}/quality/memories/${contentHash}/rate`, {
+            const response = await this.fetchWithAuth(`${this.apiBase}/quality/memories/${contentHash}/rate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
