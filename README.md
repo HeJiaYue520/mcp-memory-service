@@ -1,3 +1,10 @@
+> ⚠️ **个人 fork · 已退役 (RETIRED, 2026-06)**
+>
+> 我已不再使用本仓库。个人记忆已迁移到一个基于 Markdown 的私有记忆系统（basic-memory），代码仅作存档/参考。
+> 升级到 **v11.21.1**（存储引擎改为 Qdrant）的记录见 **PR #1**；旧版 8.x 的个人 Web 定制保留在 `backup/pre-upgrade-8.62.9-*` 分支。
+
+---
+
 # MCP Memory Service
 
 Semantic memory with teeth. A Model Context Protocol server that gives AI assistants persistent, searchable memory backed by vector search, a knowledge graph, and cognitive science you didn't ask for but definitely want.
