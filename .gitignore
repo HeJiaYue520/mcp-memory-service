@@ -43,3 +43,15 @@ build/
 .claude/
 .logs/
 .beads/
+
+# Local secrets / env (never commit — contains API tokens)
+.env
+.env.local
+.env.*.local
+.env.sqlite.backup
+
+# Local junk / build artifacts
+nul
+installation.log
+node_modules/
+package-lock.json
