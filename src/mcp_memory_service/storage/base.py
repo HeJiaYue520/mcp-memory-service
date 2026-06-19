@@ -17,18 +17,21 @@ MCP Memory Service
 Copyright (c) 2024 Heinrich Krupp
 Licensed under the MIT License. See LICENSE file in the project root for full license text.
 """
+
 import asyncio
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+from typing import Any
+
 from ..models.memory import Memory, MemoryQueryResult
+
 
 class MemoryStorage(ABC):
     """Abstract base class for memory storage implementations."""
 
     @property
     @abstractmethod
-    def max_content_length(self) -> Optional[int]:
+    def max_content_length(self) -> int | None:
         """
         Maximum content length supported by this storage backend.
 
@@ -53,13 +56,13 @@ class MemoryStorage(ABC):
     async def initialize(self) -> None:
         """Initialize the storage backend."""
         pass
-    
+
     @abstractmethod
-    async def store(self, memory: Memory) -> Tuple[bool, str]:
+    async def store(self, memory: Memory) -> tuple[bool, str]:
         """Store a memory. Returns (success, message)."""
         pass
 
-    async def store_batch(self, memories: List[Memory]) -> List[Tuple[bool, str]]:
+    async def store_batch(self, memories: list[Memory]) -> list[tuple[bool, str]]:
         """
         Store multiple memories in a single operation.
 
@@ -76,10 +79,7 @@ class MemoryStorage(ABC):
         if not memories:
             return []
 
-        results = await asyncio.gather(
-            *(self.store(memory) for memory in memories),
-            return_exceptions=True
-        )
+        results = await asyncio.gather(*(self.store(memory) for memory in memories), return_exceptions=True)
 
         # Process results to handle potential exceptions from gather
         final_results = []
@@ -90,136 +90,104 @@ class MemoryStorage(ABC):
             else:
                 final_results.append(res)
         return final_results
-    
-    @abstractmethod
-    async def retrieve(self, query: str, n_results: int = 5) -> List[MemoryQueryResult]:
-        """Retrieve memories by semantic search."""
-        pass
 
-    async def retrieve_with_quality_boost(
+    @abstractmethod
+    async def retrieve(
         self,
         query: str,
-        n_results: int = 10,
-        quality_boost: Optional[bool] = None,
-        quality_weight: Optional[float] = None
-    ) -> List[MemoryQueryResult]:
+        n_results: int = 5,
+        tags: list[str] | None = None,
+        memory_type: str | None = None,
+        min_similarity: float | None = None,
+        offset: int = 0,
+    ) -> list[MemoryQueryResult]:
         """
-        Retrieve memories with optional quality-based reranking.
-
-        This method enables quality-aware search that prioritizes high-quality memories
-        in the results. It over-fetches candidates (3x) then reranks by a composite score
-        combining semantic similarity and quality scores.
+        Retrieve memories by semantic search with optional filtering and pagination.
 
         Args:
-            query: Search query
-            n_results: Number of results to return
-            quality_boost: Enable quality reranking (default from config)
-            quality_weight: Weight for quality score 0.0-1.0 (default 0.3, meaning 30% quality, 70% semantic)
+            query: Search query text
+            n_results: Maximum number of results to return
+            tags: Optional list of tags to filter by (matches ANY tag)
+            memory_type: Optional memory type filter
+            min_similarity: Optional minimum similarity threshold
+            offset: Number of results to skip for pagination (default: 0)
 
         Returns:
-            List of MemoryQueryResult, reranked by quality if enabled
-
-        Example:
-            # Standard search (semantic similarity only)
-            results = await storage.retrieve("python async", n_results=10)
-
-            # Quality-boosted search (70% semantic + 30% quality)
-            results = await storage.retrieve_with_quality_boost(
-                "python async",
-                n_results=10,
-                quality_boost=True,
-                quality_weight=0.3
-            )
+            List of MemoryQueryResult objects, filtered and sorted by relevance
         """
-        from ..config import MCP_QUALITY_BOOST_ENABLED, MCP_QUALITY_BOOST_WEIGHT
+        pass
 
-        # Get config defaults if not specified
-        if quality_boost is None:
-            quality_boost = MCP_QUALITY_BOOST_ENABLED
-        if quality_weight is None:
-            quality_weight = MCP_QUALITY_BOOST_WEIGHT
+    async def generate_embeddings_batch(self, texts: list[str], prompt_name: str = "query") -> list[list[float]]:
+        """Generate embeddings for multiple texts in a single batched forward pass.
 
-        # Validate quality_weight
-        if not 0.0 <= quality_weight <= 1.0:
-            raise ValueError(f"quality_weight must be 0.0-1.0, got {quality_weight}")
+        .. deprecated::
+            Use ``EmbeddingProvider.embed_batch()`` instead. This method will be
+            removed once all callers migrate to the provider protocol.
 
-        if not quality_boost:
-            # Standard retrieval, no reranking
-            return await self.retrieve(query, n_results)
+        Args:
+            texts: List of texts to embed
+            prompt_name: Prompt prefix for instruction-tuned models
+                         ("query" for search queries, "passage" for documents)
+        """
+        import warnings
 
-        # Quality-boosted retrieval
-        # Step 1: Over-fetch (3x) to have pool for reranking
-        oversample_factor = 3
-        candidates = await self.retrieve(query, n_results * oversample_factor)
+        warnings.warn(
+            "generate_embeddings_batch is deprecated. Use EmbeddingProvider.embed_batch() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise NotImplementedError("Subclass must implement generate_embeddings_batch")
 
-        if not candidates:
-            return []
+    async def search_similar_tags(self, query_embedding: list[float], threshold: float = 0.5, max_tags: int = 10) -> list[str]:
+        """Find semantically similar tags via the tag embedding collection."""
+        return []
 
-        # Step 2: Rerank by composite score
-        semantic_weight = 1.0 - quality_weight
+    async def index_new_tags(self, tags: list[str]) -> None:  # noqa: B027
+        """Index new tags into the tag embedding collection (no-op if all known)."""
 
-        for result in candidates:
-            semantic_score = result.relevance_score  # Original similarity
-            quality_score = result.memory.quality_score
+    async def search_by_vector(
+        self,
+        embedding: list[float],
+        n_results: int = 10,
+        tags: list[str] | None = None,
+        memory_type: str | None = None,
+        min_similarity: float | None = None,
+        offset: int = 0,
+    ) -> list[MemoryQueryResult]:
+        """Search using a pre-computed embedding vector (skips embedding generation)."""
+        raise NotImplementedError("Subclass must implement search_by_vector")
 
-            # Composite score
-            result.relevance_score = (
-                semantic_weight * semantic_score +
-                quality_weight * quality_score
-            )
-
-            # Store components in debug_info for transparency
-            if result.debug_info is None:
-                result.debug_info = {}
-            result.debug_info.update({
-                'original_semantic_score': semantic_score,
-                'quality_score': quality_score,
-                'quality_weight': quality_weight,
-                'semantic_weight': semantic_weight,
-                'reranked': True
-            })
-
-        # Step 3: Resort by new composite score
-        candidates.sort(key=lambda r: r.relevance_score, reverse=True)
-
-        # Step 4: Return top N
-        return candidates[:n_results]
+    async def get_memories_batch(self, content_hashes: list[str]) -> list[Memory]:
+        """Fetch multiple memories by content hash in a single operation."""
+        raise NotImplementedError("Subclass must implement get_memories_batch")
 
     @abstractmethod
-    async def search_by_tag(self, tags: List[str], time_start: Optional[float] = None) -> List[Memory]:
-        """Search memories by tags with optional time filtering.
+    async def search_by_tag(
+        self,
+        tags: list[str],
+        limit: int = 10,
+        offset: int = 0,
+        match_all: bool = False,
+        start_timestamp: float | None = None,
+        end_timestamp: float | None = None,
+    ) -> list[Memory]:
+        """
+        Search memories by tags with optional date filtering.
 
         Args:
             tags: List of tags to search for
-            time_start: Optional Unix timestamp (in seconds) to filter memories created after this time
+            limit: Maximum number of results to return (default: 10)
+            offset: Number of results to skip for pagination (default: 0)
+            match_all: If True, memory must have ALL tags; if False, ANY tag (default: False)
+            start_timestamp: Filter memories from this timestamp (inclusive)
+            end_timestamp: Filter memories until this timestamp (inclusive)
 
         Returns:
-            List of Memory objects matching the tag criteria and time filter
+            List of Memory objects
         """
         pass
 
-    @abstractmethod
-    async def search_by_tags(
-        self,
-        tags: List[str],
-        operation: str = "AND",
-        time_start: Optional[float] = None,
-        time_end: Optional[float] = None
-    ) -> List[Memory]:
-        """Search memories by tags with AND/OR semantics and time range filtering.
-
-        Args:
-            tags: List of tag names to search for
-            operation: "AND" (all tags must match) or "OR" (any tag matches)
-            time_start: Optional Unix timestamp for inclusive range start
-            time_end: Optional Unix timestamp for inclusive range end
-
-        Returns:
-            List of Memory objects matching the criteria
-        """
-        pass
-
-    async def search_by_tag_chronological(self, tags: List[str], limit: int = None, offset: int = 0) -> List[Memory]:
+    async def search_by_tag_chronological(self, tags: list[str], limit: int = None, offset: int = 0) -> list[Memory]:
         """
         Search memories by tags with chronological ordering (newest first).
 
@@ -231,30 +199,23 @@ class MemoryStorage(ABC):
         Returns:
             List of Memory objects ordered by created_at DESC
         """
-        # Default implementation: use search_by_tag then sort
-        memories = await self.search_by_tag(tags)
+        # Use search_by_tag with pagination (most backends handle ordering)
+        # If limit is None, use a high default for backward compatibility
+        effective_limit = limit if limit is not None else 10000
+        memories = await self.search_by_tag(tags, limit=effective_limit, offset=offset)
+
+        # Ensure chronological ordering (newest first)
         memories.sort(key=lambda m: m.created_at or 0, reverse=True)
 
-        # Apply pagination
-        if offset > 0:
-            memories = memories[offset:]
-        if limit is not None:
-            memories = memories[:limit]
-
         return memories
-    
-    @abstractmethod
-    async def delete(self, content_hash: str) -> Tuple[bool, str]:
-        """Delete a memory by its hash."""
-        pass
 
     @abstractmethod
-    async def get_by_hash(self, content_hash: str) -> Optional[Memory]:
+    async def get_memory_by_hash(self, content_hash: str) -> Memory | None:
         """
-        Get a memory by its content hash using direct O(1) lookup.
+        Retrieve a specific memory by its content hash.
 
         Args:
-            content_hash: The content hash of the memory to retrieve
+            content_hash: The content hash of the memory
 
         Returns:
             Memory object if found, None otherwise
@@ -262,11 +223,16 @@ class MemoryStorage(ABC):
         pass
 
     @abstractmethod
-    async def delete_by_tag(self, tag: str) -> Tuple[int, str]:
+    async def delete(self, content_hash: str) -> tuple[bool, str]:
+        """Delete a memory by its hash."""
+        pass
+
+    @abstractmethod
+    async def delete_by_tag(self, tag: str) -> tuple[int, str]:
         """Delete memories by tag. Returns (count_deleted, message)."""
         pass
 
-    async def delete_by_tags(self, tags: List[str]) -> Tuple[int, str]:
+    async def delete_by_tags(self, tags: list[str]) -> tuple[int, str]:
         """
         Delete memories matching ANY of the given tags.
 
@@ -303,12 +269,27 @@ class MemoryStorage(ABC):
         return total_count, f"Deleted {total_count} memories across {len(tags)} tag(s)"
 
     @abstractmethod
-    async def cleanup_duplicates(self) -> Tuple[int, str]:
+    async def delete_by_all_tags(self, tags: list[str]) -> tuple[int, str]:
+        """
+        Delete memories matching ALL of the given tags (AND logic).
+
+        Args:
+            tags: List of tags - only memories containing ALL tags will be deleted
+
+        Returns:
+            Tuple of (count_deleted, message)
+        """
+        pass
+
+    @abstractmethod
+    async def cleanup_duplicates(self) -> tuple[int, str]:
         """Remove duplicate memories. Returns (count_removed, message)."""
         pass
-    
+
     @abstractmethod
-    async def update_memory_metadata(self, content_hash: str, updates: Dict[str, Any], preserve_timestamps: bool = True) -> Tuple[bool, str]:
+    async def update_memory_metadata(
+        self, content_hash: str, updates: dict[str, Any], preserve_timestamps: bool = True
+    ) -> tuple[bool, str]:
         """
         Update memory metadata without recreating the entire memory entry.
 
@@ -338,76 +319,55 @@ class MemoryStorage(ABC):
         Returns:
             True if update was successful, False otherwise
         """
-        updates = {
-            'tags': memory.tags,
-            'metadata': memory.metadata,
-            'memory_type': memory.memory_type
-        }
-        success, _ = await self.update_memory_metadata(
-            memory.content_hash,
-            updates,
-            preserve_timestamps=True
-        )
+        updates = {"tags": memory.tags, "metadata": memory.metadata, "memory_type": memory.memory_type}
+        success, _ = await self.update_memory_metadata(memory.content_hash, updates, preserve_timestamps=True)
         return success
 
-    async def update_memories_batch(self, memories: List[Memory]) -> List[bool]:
-        """
-        Update multiple memories in a batch operation.
+    async def increment_access_count(self, content_hash: str) -> None:  # noqa: B027
+        """Increment retrieval counter for salience scoring. Override in backends."""
+        pass
 
-        Default implementation calls update_memory() for each memory concurrently using asyncio.gather.
-        Override this method in concrete storage backends to provide true batch operations
-        for improved performance (e.g., single database transaction with multiple UPDATEs).
-
-        Args:
-            memories: List of Memory objects with updated fields
-
-        Returns:
-            List of success booleans, one for each memory in the batch
-        """
-        if not memories:
-            return []
-
-        results = await asyncio.gather(
-            *(self.update_memory(memory) for memory in memories),
-            return_exceptions=True
-        )
-
-        # Process results to handle potential exceptions from gather
-        final_results = []
-        for res in results:
-            if isinstance(res, Exception):
-                final_results.append(False)
-            else:
-                final_results.append(res)
-        return final_results
-    
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get storage statistics. Override for specific implementations."""
-        return {
-            "total_memories": 0,
-            "storage_backend": self.__class__.__name__,
-            "status": "operational"
-        }
-    
-    async def get_all_tags(self) -> List[str]:
+        return {"total_memories": 0, "storage_backend": self.__class__.__name__, "status": "operational"}
+
+    async def get_all_tags(self) -> list[str]:
         """Get all unique tags in the storage. Override for specific implementations."""
         return []
-    
-    async def get_recent_memories(self, n: int = 10) -> List[Memory]:
+
+    async def get_recent_memories(self, n: int = 10) -> list[Memory]:
         """Get n most recent memories. Override for specific implementations."""
         return []
-    
-    async def recall_memory(self, query: str, n_results: int = 5) -> List[Memory]:
+
+    async def recall_memory(
+        self,
+        query: str,
+        n_results: int = 5,
+        tags: list[str] | None = None,
+        memory_type: str | None = None,
+        min_similarity: float | None = None,
+        offset: int = 0,
+    ) -> list[Memory]:
         """Recall memories based on natural language time expression. Override for specific implementations."""
         # Default implementation just uses regular search
-        results = await self.retrieve(query, n_results)
+        results = await self.retrieve(query, n_results, tags, memory_type, min_similarity, offset)
         return [r.memory for r in results]
-    
-    async def search(self, query: str, n_results: int = 5) -> List[MemoryQueryResult]:
+
+    async def search(
+        self,
+        query: str,
+        n_results: int = 5,
+        tags: list[str] | None = None,
+        memory_type: str | None = None,
+        min_similarity: float | None = None,
+        offset: int = 0,
+    ) -> list[MemoryQueryResult]:
         """Search memories. Default implementation uses retrieve."""
-        return await self.retrieve(query, n_results)
-    
-    async def get_all_memories(self, limit: int = None, offset: int = 0, memory_type: Optional[str] = None, tags: Optional[List[str]] = None) -> List[Memory]:
+        return await self.retrieve(query, n_results, tags, memory_type, min_similarity, offset)
+
+    async def get_all_memories(
+        self, limit: int = None, offset: int = 0, memory_type: str | None = None, tags: list[str] | None = None
+    ) -> list[Memory]:
         """
         Get all memories in storage ordered by creation time (newest first).
 
@@ -421,8 +381,44 @@ class MemoryStorage(ABC):
             List of Memory objects ordered by created_at DESC, optionally filtered by type and tags
         """
         return []
-    
-    async def count_all_memories(self, memory_type: Optional[str] = None, tags: Optional[List[str]] = None) -> int:
+
+    async def count(self) -> int:
+        """
+        Get total count of all memories in storage.
+
+        Convenience method that delegates to count_all_memories() with no filters.
+        Required by hybrid search in MemoryService.retrieve_memories().
+
+        Returns:
+            Total number of memories in storage
+        """
+        return await self.count_all_memories()
+
+    async def search_by_tags(
+        self,
+        tags: list[str],
+        match_all: bool = False,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[Memory]:
+        """
+        Search memories by tags (plural alias).
+
+        Delegates to search_by_tag() which is the abstract method all backends implement.
+        Required by hybrid search in MemoryService.retrieve_memories().
+
+        Args:
+            tags: List of tags to search for
+            match_all: If True, memory must have ALL tags; if False, ANY tag (default: False)
+            limit: Maximum number of results to return (default: 10)
+            offset: Number of results to skip for pagination (default: 0)
+
+        Returns:
+            List of Memory objects
+        """
+        return await self.search_by_tag(tags=tags, match_all=match_all, limit=limit, offset=offset)
+
+    async def count_all_memories(self, memory_type: str | None = None, tags: list[str] | None = None) -> int:
         """
         Get total count of memories in storage.
 
@@ -435,7 +431,7 @@ class MemoryStorage(ABC):
         """
         return 0
 
-    async def count_memories_by_tag(self, tags: List[str]) -> int:
+    async def count_memories_by_tag(self, tags: list[str]) -> int:
         """
         Count memories that match any of the given tags.
 
@@ -449,41 +445,77 @@ class MemoryStorage(ABC):
         memories = await self.search_by_tag(tags)
         return len(memories)
 
-    async def get_memories_by_time_range(self, start_time: float, end_time: float) -> List[Memory]:
+    @abstractmethod
+    async def count_semantic_search(
+        self, query: str, tags: list[str] | None = None, memory_type: str | None = None, min_similarity: float | None = None
+    ) -> int:
+        """
+        Count memories matching semantic search criteria.
+
+        This enables pagination for semantic search without loading all results.
+        Should perform same filtering as retrieve() but return count only.
+
+        Args:
+            query: Search query text
+            tags: Optional list of tags to filter by (matches ANY tag)
+            memory_type: Optional memory type filter
+            min_similarity: Optional minimum similarity threshold
+
+        Returns:
+            Total number of memories matching the criteria
+        """
+        pass
+
+    @abstractmethod
+    async def count_tag_search(
+        self, tags: list[str], match_all: bool = False, start_timestamp: float | None = None, end_timestamp: float | None = None
+    ) -> int:
+        """
+        Count memories matching tag search with optional date filtering.
+
+        Should use same filters as search_by_tag() for consistency.
+
+        Args:
+            tags: List of tags to search for
+            match_all: If True, memory must have ALL tags; if False, ANY tag (default)
+            start_timestamp: Filter memories from this timestamp (inclusive)
+            end_timestamp: Filter memories until this timestamp (inclusive)
+
+        Returns:
+            Total number of memories matching the criteria
+        """
+        pass
+
+    @abstractmethod
+    async def count_time_range(
+        self,
+        start_timestamp: float | None = None,
+        end_timestamp: float | None = None,
+        tags: list[str] | None = None,
+        memory_type: str | None = None,
+    ) -> int:
+        """
+        Count memories within time range with optional filters.
+
+        Args:
+            start_timestamp: Filter from this time (inclusive)
+            end_timestamp: Filter until this time (inclusive)
+            tags: Optional tag filter (ANY match)
+            memory_type: Optional type filter
+
+        Returns:
+            Total number of memories matching the criteria
+        """
+        pass
+
+    async def get_memories_by_time_range(self, start_time: float, end_time: float) -> list[Memory]:
         """Get memories within a time range. Override for specific implementations."""
         return []
-    
-    async def get_memory_connections(self) -> Dict[str, int]:
+
+    async def get_memory_connections(self) -> dict[str, int]:
         """Get memory connection statistics. Override for specific implementations."""
         return {}
 
-    async def get_access_patterns(self) -> Dict[str, datetime]:
+    async def get_access_patterns(self) -> dict[str, datetime]:
         """Get memory access pattern statistics. Override for specific implementations."""
         return {}
-
-    async def get_memory_timestamps(self, days: Optional[int] = None) -> List[float]:
-        """
-        Get memory creation timestamps only, without loading full memory objects.
-
-        This is an optimized method for analytics that only needs timestamps,
-        avoiding the overhead of loading full memory content and embeddings.
-
-        Args:
-            days: Optional filter to only get memories from last N days
-
-        Returns:
-            List of Unix timestamps (float) in descending order (newest first)
-        """
-        # Default implementation falls back to get_recent_memories
-        # Concrete backends should override with optimized SQL queries
-        n = 5000 if days is None else days * 100  # Rough estimate
-        memories = await self.get_recent_memories(n=n)
-        timestamps = [m.created_at for m in memories if m.created_at]
-
-        # Filter by days if specified
-        if days is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            cutoff_timestamp = cutoff.timestamp()
-            timestamps = [ts for ts in timestamps if ts >= cutoff_timestamp]
-
-        return sorted(timestamps, reverse=True)

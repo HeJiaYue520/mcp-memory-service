@@ -27,19 +27,19 @@ function calculateTimeDecay(memoryDate, decayRate = 0.1) {
         if (isNaN(memoryTime.getTime())) {
             return 0.5; // Default score for invalid dates
         }
-        
+
         // Calculate days since memory creation
         const daysDiff = (now - memoryTime) / (1000 * 60 * 60 * 24);
-        
+
         // Exponential decay: score = e^(-decayRate * days)
         // Recent memories (0-7 days): score 0.8-1.0
         // Older memories (8-30 days): score 0.3-0.8
         // Ancient memories (30+ days): score 0.0-0.3
         const decayScore = Math.exp(-decayRate * daysDiff);
-        
+
         // Ensure score is between 0 and 1
         return Math.max(0.01, Math.min(1.0, decayScore));
-        
+
     } catch (error) {
         // Silently fail with default score to avoid noise
         return 0.5;
@@ -55,45 +55,47 @@ function calculateTagRelevance(memoryTags = [], projectContext) {
         if (!Array.isArray(memoryTags) || memoryTags.length === 0) {
             return 0.3; // Default score for memories without tags
         }
-        
+
         const contextTags = [
             projectContext.name?.toLowerCase(),
             projectContext.language?.toLowerCase(),
             ...(projectContext.frameworks || []).map(f => f.toLowerCase()),
             ...(projectContext.tools || []).map(t => t.toLowerCase())
         ].filter(Boolean);
-        
+
         if (contextTags.length === 0) {
             return 0.5; // No context to match against
         }
-        
-        // Calculate tag overlap (exact match only to prevent cross-project pollution)
+
+        // Calculate tag overlap
         const memoryTagsLower = memoryTags.map(tag => tag.toLowerCase());
         const matchingTags = contextTags.filter(contextTag =>
-            memoryTagsLower.includes(contextTag)
+            memoryTagsLower.some(memoryTag =>
+                memoryTag.includes(contextTag) || contextTag.includes(memoryTag)
+            )
         );
-        
+
         // Score based on percentage of matching tags
         const overlapScore = matchingTags.length / contextTags.length;
-        
+
         // Bonus for exact project name matches
         const exactProjectMatch = memoryTagsLower.includes(projectContext.name?.toLowerCase());
         const projectBonus = exactProjectMatch ? 0.3 : 0;
-        
-        // Bonus for exact language matches  
+
+        // Bonus for exact language matches
         const exactLanguageMatch = memoryTagsLower.includes(projectContext.language?.toLowerCase());
         const languageBonus = exactLanguageMatch ? 0.2 : 0;
-        
+
         // Bonus for framework matches
         const frameworkMatches = (projectContext.frameworks || []).filter(framework =>
             memoryTagsLower.some(tag => tag.includes(framework.toLowerCase()))
         );
         const frameworkBonus = frameworkMatches.length * 0.1;
-        
+
         const totalScore = Math.min(1.0, overlapScore + projectBonus + languageBonus + frameworkBonus);
-        
+
         return Math.max(0.1, totalScore);
-        
+
     } catch (error) {
         // Silently fail with default score to avoid noise
         return 0.3;
@@ -108,9 +110,9 @@ function calculateContentQuality(memoryContent = '') {
         if (!memoryContent || typeof memoryContent !== 'string') {
             return 0.1;
         }
-        
+
         const content = memoryContent.trim();
-        
+
         // Check for generic session summary patterns
         const genericPatterns = [
             /## 🎯 Topics Discussed\s*-\s*implementation\s*-\s*\.\.\.?$/m,
@@ -118,41 +120,41 @@ function calculateContentQuality(memoryContent = '') {
             /Session Summary.*implementation.*\.\.\..*$/s,
             /^# Session Summary.*Date.*Project.*Topics Discussed.*implementation.*\.\.\..*$/s
         ];
-        
+
         const isGeneric = genericPatterns.some(pattern => pattern.test(content));
         if (isGeneric) {
             return 0.05; // Heavily penalize generic content
         }
-        
+
         // Check content length and substance
         if (content.length < 50) {
             return 0.2; // Short content gets low score
         }
-        
+
         // Check for meaningful content indicators
         const meaningfulIndicators = [
             'decided', 'implemented', 'changed', 'fixed', 'created', 'updated',
             'because', 'reason', 'approach', 'solution', 'result', 'impact',
             'learned', 'discovered', 'found', 'issue', 'problem', 'challenge'
         ];
-        
-        const meaningfulMatches = meaningfulIndicators.filter(indicator => 
+
+        const meaningfulMatches = meaningfulIndicators.filter(indicator =>
             content.toLowerCase().includes(indicator)
         ).length;
-        
+
         // Calculate information density
         const words = content.split(/\s+/).filter(w => w.length > 2);
         const uniqueWords = new Set(words.map(w => w.toLowerCase()));
         const diversityRatio = uniqueWords.size / Math.max(words.length, 1);
-        
+
         // Combine factors
         const meaningfulnessScore = Math.min(0.4, meaningfulMatches * 0.08);
         const diversityScore = Math.min(0.3, diversityRatio * 0.5);
         const lengthScore = Math.min(0.3, content.length / 1000); // Longer content gets bonus
-        
+
         const qualityScore = meaningfulnessScore + diversityScore + lengthScore;
         return Math.max(0.05, Math.min(1.0, qualityScore));
-        
+
     } catch (error) {
         // Silently fail with default score to avoid noise
         return 0.3;
@@ -168,7 +170,7 @@ function calculateContentRelevance(memoryContent = '', projectContext) {
         if (!memoryContent || typeof memoryContent !== 'string') {
             return 0.3;
         }
-        
+
         const content = memoryContent.toLowerCase();
         const keywords = [
             projectContext.name?.toLowerCase(),
@@ -176,18 +178,18 @@ function calculateContentRelevance(memoryContent = '', projectContext) {
             ...(projectContext.frameworks || []).map(f => f.toLowerCase()),
             ...(projectContext.tools || []).map(t => t.toLowerCase()),
             // Add common technical keywords
-            'architecture', 'decision', 'implementation', 'bug', 'fix', 
+            'architecture', 'decision', 'implementation', 'bug', 'fix',
             'feature', 'config', 'setup', 'deployment', 'performance'
         ].filter(Boolean);
-        
+
         if (keywords.length === 0) {
             return 0.5;
         }
-        
+
         // Count keyword occurrences
         let totalMatches = 0;
         let keywordScore = 0;
-        
+
         keywords.forEach(keyword => {
             const occurrences = (content.match(new RegExp(keyword, 'g')) || []).length;
             if (occurrences > 0) {
@@ -195,13 +197,13 @@ function calculateContentRelevance(memoryContent = '', projectContext) {
                 keywordScore += Math.log(1 + occurrences) * 0.1; // Logarithmic scoring
             }
         });
-        
+
         // Normalize score
         const matchRatio = totalMatches / keywords.length;
         const contentScore = Math.min(1.0, matchRatio + keywordScore);
-        
+
         return Math.max(0.1, contentScore);
-        
+
     } catch (error) {
         // Silently fail with default score to avoid noise
         return 0.3;
@@ -273,32 +275,6 @@ function calculateRecencyBonus(memoryDate) {
 
     } catch (error) {
         return 0;
-    }
-}
-
-/**
- * Extract backend quality score from memory metadata
- * This leverages the AI-based quality scoring from the MCP Memory Service backend
- * (ONNX local SLM, Groq, or implicit signals)
- */
-function calculateBackendQuality(memory) {
-    try {
-        // Check for quality_score in metadata (set by backend quality system)
-        if (memory.metadata && typeof memory.metadata.quality_score === 'number') {
-            return memory.metadata.quality_score;
-        }
-
-        // Also check direct property (some API responses flatten metadata)
-        if (typeof memory.quality_score === 'number') {
-            return memory.quality_score;
-        }
-
-        // Default to neutral score if not available
-        // This ensures graceful fallback when backend hasn't scored the memory
-        return 0.5;
-
-    } catch (error) {
-        return 0.5; // Neutral fallback
     }
 }
 
@@ -401,22 +377,19 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
             conversationAnalysis = null
         } = options;
 
-        // Default weights including content quality and backend quality factors
-        // Backend quality leverages AI-based semantic scoring from MCP Memory Service
+        // Default weights including content quality factor
         const defaultWeights = includeConversationContext ? {
-            timeDecay: 0.15,           // Reduced weight for time
-            tagRelevance: 0.25,        // Tag matching remains important
-            contentRelevance: 0.10,    // Content matching reduced
-            contentQuality: 0.15,      // Heuristic quality factor
-            backendQuality: 0.15,      // AI-based backend quality (ONNX/Groq)
-            conversationRelevance: 0.20, // Conversation context factor
+            timeDecay: 0.20,           // Reduced weight for time
+            tagRelevance: 0.30,        // Tag matching remains important
+            contentRelevance: 0.15,    // Content matching reduced
+            contentQuality: 0.25,      // New quality factor
+            conversationRelevance: 0.25, // Conversation context factor
             typeBonus: 0.05            // Memory type provides minor adjustment
         } : {
-            timeDecay: 0.20,           // Reduced time weight
-            tagRelevance: 0.30,        // Tag matching important
-            contentRelevance: 0.10,    // Content matching reduced
-            contentQuality: 0.20,      // Heuristic quality factor
-            backendQuality: 0.20,      // AI-based backend quality (ONNX/Groq)
+            timeDecay: 0.25,           // Reduced time weight
+            tagRelevance: 0.35,        // Tag matching important
+            contentRelevance: 0.15,    // Content matching
+            contentQuality: 0.25,      // Quality factor prioritized
             typeBonus: 0.05            // Type bonus reduced
         };
 
@@ -427,7 +400,6 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
         const tagScore = calculateTagRelevance(memory.tags, projectContext);
         const contentScore = calculateContentRelevance(memory.content, projectContext);
         const qualityScore = calculateContentQuality(memory.content);
-        const backendQualityScore = calculateBackendQuality(memory); // AI-based quality from backend
         const typeBonus = calculateTypeBonus(memory.memory_type);
         const recencyBonus = calculateRecencyBonus(memory.created_at || memory.created_at_iso);
 
@@ -436,7 +408,6 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
             (tagScore * w.tagRelevance) +
             (contentScore * w.contentRelevance) +
             (qualityScore * w.contentQuality) +
-            (backendQualityScore * (w.backendQuality || 0)) + // Backend AI quality score
             typeBonus + // Type bonus is not weighted, acts as adjustment
             recencyBonus // Recency bonus provides explicit boost for very recent memories
         );
@@ -446,7 +417,6 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
             tagRelevance: tagScore,
             contentRelevance: contentScore,
             contentQuality: qualityScore,
-            backendQuality: backendQualityScore, // AI-based quality from ONNX/Groq
             typeBonus: typeBonus,
             recencyBonus: recencyBonus
         };
@@ -457,47 +427,22 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
             finalScore += (conversationScore * (w.conversationRelevance || 0));
             breakdown.conversationRelevance = conversationScore;
         }
-        
+
         // Apply quality penalty for very low quality content (multiplicative)
         if (qualityScore < 0.2) {
             finalScore *= 0.5; // Heavily penalize low quality content
         }
 
-        // Apply project affinity penalty - memories without project tag match get penalized
-        // This prevents cross-project memory pollution (e.g., Azure memories in Python project)
-        const memoryTags = (memory.tags || []).map(t => t.toLowerCase());
-        const memoryContent = (memory.content || '').toLowerCase();
-        const projectName = projectContext.name?.toLowerCase();
-
-        // Check for project name in tags OR content
-        const hasProjectTag = projectName && (
-            memoryTags.some(tag => tag === projectName || tag.includes(projectName)) ||
-            memoryContent.includes(projectName)
-        );
-
-        if (!hasProjectTag && tagScore < 0.3) {
-            // No project reference at all - definitely unrelated memory
-            // Hard filter: set score to 0 to exclude from results entirely
-            finalScore = 0;
-            breakdown.projectAffinity = 'none (filtered)';
-        } else if (!hasProjectTag) {
-            // Some tag relevance but no project tag - might be related
-            finalScore *= 0.5; // Moderate penalty
-            breakdown.projectAffinity = 'low';
-        } else {
-            breakdown.projectAffinity = 'high';
-        }
-
         // Ensure score is between 0 and 1
         const normalizedScore = Math.max(0, Math.min(1, finalScore));
-        
+
         return {
             finalScore: normalizedScore,
             breakdown: breakdown,
             weights: w,
             hasConversationContext: includeConversationContext
         };
-        
+
     } catch (error) {
         // Silently fail with default score to avoid noise
         return {
@@ -515,20 +460,20 @@ function calculateRelevanceScore(memory, projectContext, options = {}) {
 function scoreMemoryRelevance(memories, projectContext, options = {}) {
     try {
         const { verbose = true } = options;
-        
+
         if (!Array.isArray(memories)) {
             if (verbose) console.warn('[Memory Scorer] Invalid memories array');
             return [];
         }
-        
+
         if (verbose) {
             console.log(`[Memory Scorer] Scoring ${memories.length} memories for project: ${projectContext.name}`);
         }
-        
+
         // Score each memory
         const scoredMemories = memories.map(memory => {
             const scoreResult = calculateRelevanceScore(memory, projectContext, options);
-            
+
             return {
                 ...memory,
                 relevanceScore: scoreResult.finalScore,
@@ -536,10 +481,10 @@ function scoreMemoryRelevance(memories, projectContext, options = {}) {
                 hasConversationContext: scoreResult.hasConversationContext
             };
         });
-        
+
         // Sort by relevance score (highest first)
         const sortedMemories = scoredMemories.sort((a, b) => b.relevanceScore - a.relevanceScore);
-        
+
         // Log scoring results for debugging
         if (verbose) {
             console.log('[Memory Scorer] Top scored memories:');
@@ -547,9 +492,9 @@ function scoreMemoryRelevance(memories, projectContext, options = {}) {
                 console.log(`  ${index + 1}. Score: ${memory.relevanceScore.toFixed(3)} - ${memory.content.substring(0, 60)}...`);
             });
         }
-        
+
         return sortedMemories;
-        
+
     } catch (error) {
         if (verbose) console.error('[Memory Scorer] Error scoring memories:', error.message);
         return memories || [];
@@ -750,9 +695,6 @@ module.exports = {
     calculateTimeDecay,
     calculateTagRelevance,
     calculateContentRelevance,
-    calculateContentQuality,
-    calculateBackendQuality,  // AI-based quality scoring integration
-    calculateConversationRelevance,
     calculateTypeBonus,
     calculateRecencyBonus,
     filterByRelevance,
@@ -769,7 +711,7 @@ if (require.main === module) {
         frameworks: ['Node.js'],
         tools: ['npm']
     };
-    
+
     const mockMemories = [
         {
             content: 'Decided to use SQLite-vec for better performance in MCP Memory Service',
@@ -780,7 +722,7 @@ if (require.main === module) {
         {
             content: 'Fixed bug in JavaScript hook implementation for Claude Code integration',
             tags: ['javascript', 'bug-fix', 'claude-code'],
-            memory_type: 'bug-fix', 
+            memory_type: 'bug-fix',
             created_at: '2025-08-18T15:30:00Z'
         },
         {
@@ -790,7 +732,7 @@ if (require.main === module) {
             created_at: '2025-08-01T08:00:00Z'
         }
     ];
-    
+
     console.log('\n=== MEMORY SCORING TEST ===');
     const scored = scoreMemoryRelevance(mockMemories, mockProjectContext);
     console.log('\n=== SCORED RESULTS ===');

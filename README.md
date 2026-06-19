@@ -1,635 +1,346 @@
 # MCP Memory Service
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![PyPI version](https://img.shields.io/pypi/v/mcp-memory-service?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/mcp-memory-service/)
-[![Python](https://img.shields.io/pypi/pyversions/mcp-memory-service?logo=python&logoColor=white)](https://pypi.org/project/mcp-memory-service/)
-[![GitHub stars](https://img.shields.io/github/stars/doobidoo/mcp-memory-service?style=social)](https://github.com/doobidoo/mcp-memory-service/stargazers)
-[![Works with Claude](https://img.shields.io/badge/Works%20with-Claude-blue)](https://claude.ai)
-[![Works with Cursor](https://img.shields.io/badge/Works%20with-Cursor-orange)](https://cursor.sh)
+Semantic memory with teeth. A Model Context Protocol server that gives AI assistants persistent, searchable memory backed by vector search, a knowledge graph, and cognitive science you didn't ask for but definitely want.
 
-## Stop Re-Explaining Your Project to AI Every Session
+## Quick Start
 
-<p align="center">
-  <img width="240" alt="MCP Memory Service" src="https://github.com/user-attachments/assets/eab1f341-ca54-445c-905e-273cd9e89555" />
-</p>
+### Docker + HTTP (Recommended)
 
-Your AI assistant forgets everything when you start a new chat. After 50 tool uses, context explodes to 500k+ tokens—Claude slows down, you restart, and now it remembers nothing. You spend 10 minutes re-explaining your architecture. **Again.**
-
-**MCP Memory Service solves this.**
-
-It automatically captures your project context, architecture decisions, and code patterns. When you start fresh sessions, your AI already knows everything—no re-explaining, no context loss, no wasted time.
-
-### ⚡ Works With Your Favorite AI Tools
-
-#### 🖥️ CLI & Terminal AI
-**Claude Code** · **Gemini Code Assist** · **Aider** · **GitHub Copilot CLI** · **Amp** · **Continue** · **Zed** · **Cody**
-
-#### 🎨 Desktop & IDE
-**Claude Desktop** · **VS Code** · **Cursor** · **Windsurf** · **Raycast** · **JetBrains** · **Sourcegraph** · **Qodo**
-
-**Works seamlessly with any MCP-compatible client** - whether you code in the terminal, IDE, or browser.
-
----
-
-## 🚀 Get Started in 60 Seconds
-
-**Express Install** (recommended for most users):
+Run the server, point your MCP client at it. Done.
 
 ```bash
-pip install mcp-memory-service
-# Auto-configure for Claude Desktop (macOS/Linux)
-python -m mcp_memory_service.scripts.installation.install --quick
+docker run -d \
+  -p 8001:8001 \
+  -v memory-data:/app/data \
+  -e MCP_TRANSPORT_MODE=http \
+  -e MCP_SERVER_PORT=8001 \
+  ghcr.io/27b-io/mcp-memory-service:latest
 ```
 
-**What just happened?**
-- ✅ Installed memory service
-- ✅ Configured optimal backend (SQLite)
-- ✅ Set up Claude Desktop integration
-- ✅ Enabled automatic context capture
-
-**Next:** Restart Claude Desktop. Your AI now remembers everything across sessions.
-
-<details>
-<summary><strong>📦 Alternative: PyPI + Manual Configuration</strong></summary>
-
-```bash
-pip install mcp-memory-service
-```
-
-Then add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "command": "memory",
-      "args": ["server"]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>🔧 Advanced: Custom Backends & Team Setup</strong></summary>
-
-For production deployments, team collaboration, or cloud sync:
-
-```bash
-git clone https://github.com/doobidoo/mcp-memory-service.git
-cd mcp-memory-service
-python scripts/installation/install.py
-```
-
-Choose from:
-- **SQLite** (local, fast, single-user)
-- **Cloudflare** (cloud, multi-device sync)
-- **Hybrid** (best of both: 5ms local + background cloud sync)
-
-</details>
-
----
-
-## 💡 Why You Need This
-
-### The Problem
-
-| Session 1 | Session 2 (Fresh Start) |
-|-----------|-------------------------|
-| You: "We're building a Next.js app with Prisma and tRPC" | AI: "What's your tech stack?" ❌ |
-| AI: "Got it, I see you're using App Router" | You: *Explains architecture again for 10 minutes* 😤 |
-| You: "Add authentication with NextAuth" | AI: "Should I use Pages Router or App Router?" ❌ |
-
-### The Solution
-
-| Session 1 | Session 2 (Fresh Start) |
-|-----------|-------------------------|
-| You: "We're building a Next.js app with Prisma and tRPC" | AI: "I remember—Next.js App Router with Prisma and tRPC. What should we build?" ✅ |
-| AI: "Got it, I see you're using App Router" | You: "Add OAuth login" |
-| You: "Add authentication with NextAuth" | AI: "I'll integrate NextAuth with your existing Prisma setup." ✅ |
-
-**Result:** Zero re-explaining. Zero context loss. Just continuous, intelligent collaboration.
-
----
-
-## ✨ Key Features
-
-🧠 **Persistent Memory** – Context survives across sessions with semantic search
-🔍 **Smart Retrieval** – Finds relevant context automatically using AI embeddings
-⚡ **5ms Speed** – Instant context injection, no latency
-🔄 **Multi-Client** – Works across 13+ AI applications
-☁️ **Cloud Sync** – Optional Cloudflare backend for team collaboration
-🔒 **Privacy-First** – Local-first, you control your data
-📊 **Web Dashboard** – Visualize and manage memories at `http://localhost:8000`
-
----
-
-## 🆕 Latest Release: **v8.62.9** (Dec 30, 2025)
-
-**CI Race Condition & TypeError Fixed in Hybrid Backend**
-
-- 🐛 **Race Condition Fix** - Eliminates "Task was destroyed but pending" warnings in GitHub Actions CI
-- 🔧 **TypeError Fix** - Handles None values in total_memories stats (not just missing keys)
-- ✅ **Test Stability** - Fixes spurious CI failures on Linux (passed locally on Windows)
-- 🚀 **Robustness** - Proper background task cleanup during shutdown, improved edge case handling
-
-**Previous Releases**:
-- **v8.62.8** - Environment Configuration Loading Bug Fixed (.env discovery, python-dotenv dependency)
-- **v8.62.7** - Windows SessionStart Hook Bug Fixed in Claude Code 2.0.76+ (no more Windows hanging)
-- **v8.62.6** - CRITICAL PRODUCTION HOTFIX: SQLite Pragmas Container Restart Bug (database locking errors after container restarts)
-- **v8.62.5** - Test Suite Stability: 40 Tests Fixed (99% pass rate, 68% → 99% improvement)
-- **v8.62.4** - CRITICAL BUGFIX: SQLite-Vec KNN Syntax Error (semantic search completely broken on sqlite-vec/hybrid backends)
-- **v8.62.3** - CRITICAL BUGFIX: Memory Recall Handler Import Error (time_parser import path correction)
-- **v8.62.2** - Test Infrastructure Improvements (5 test failures resolved, consolidation & performance suite stability)
-- **v8.62.1** - Critical Bug Fix: SessionEnd Hook Real Conversation Data (hardcoded mock data fix, robust transcript parsing)
-- **v8.62.0** - Comprehensive Test Coverage Infrastructure - 100% Handler Coverage Achievement (35 tests, 800+ lines, CI/CD gate)
-- **v8.61.2** - CRITICAL HOTFIX: delete_memory KeyError Fix (response parsing, validated delete flow)
-- **v8.61.1** - CRITICAL HOTFIX: Import Error Fix (5 MCP tools restored, relative import path correction)
-- **v8.60.0** - Health Check Strategy Pattern Refactoring - Phase 3.1 (78% complexity reduction, Strategy pattern)
-- **v8.59.0** - Server Architecture Refactoring - Phase 2 (40% code reduction, 29 handlers extracted, 5 specialized modules)
-- **v8.58.0** - Test Infrastructure Stabilization - 100% Pass Rate Achievement (81.6% → 100%, 52 tests fixed)
-- **v8.57.1** - Hotfix: Python -m Execution Support for CI/CD (server/__main__.py, --version/--help flags)
-- **v8.57.0** - Test Infrastructure Improvements - Major Stability Boost (+6% pass rate, 32 tests fixed)
-- **v8.56.0** - Server Architecture Refactoring - Phase 1 (4 focused modules, -7% lines, backward compatible)
-- **v8.55.0** - AI-Optimized MCP Tool Descriptions (30-50% reduction in incorrect tool selection)
-- **v8.54.4** - Critical MCP Tool Bugfix (check_database_health method call correction)
-- **v8.54.3** - Chunked Storage Error Reporting Fix (accurate failure messages, partial success tracking)
-- **v8.54.2** - Offline Mode Fix (opt-in offline mode, first-time install support)
-- **v8.54.1** - UV Virtual Environment Support (installer compatibility fix)
-- **v8.54.0** - Smart Auto-Capture System (intelligent pattern detection, 6 memory types, bilingual support)
-- **v8.53.0** - Windows Service Management (Task Scheduler support, auto-startup, watchdog monitoring, 819 lines PowerShell automation)
-- **v8.52.2** - Hybrid Backend Maintenance Enhancement (multi-PC association cleanup, drift prevention, Vectorize error handling)
-- **v8.52.1** - Windows Embedding Fallback & Script Portability (DLL init failure fix, MCP_HTTP_PORT support)
-- **v8.52.0** - Time-of-Day Emoji Icons (8 time-segment indicators, dark mode support, automatic timezone)
-- **v8.51.0** - Graph Database Architecture (30x query performance, 97% storage reduction for associations)
-- **v8.50.1** - Critical Bug Fixes (MCP_EMBEDDING_MODEL fix, installation script backend support, i18n quality analytics complete)
-- **v8.50.0** - Fallback Quality Scoring (DeBERTa + MS-MARCO hybrid, technical content rescue, 20/20 tests passing)
-- **v8.49.0** - DeBERTa Quality Classifier (absolute quality assessment, eliminates self-matching bias)
-- **v8.48.4** - Cloudflare D1 Drift Detection Performance (10-100x faster queries, numeric comparison fix)
-- **v8.48.3** - Code Execution Hook Fix - 75% token reduction now working (fixed time_filter parameter, Python warnings, venv detection)
-- **v8.48.2** - HTTP Server Auto-Start & Time Parser Improvements (smart service management, "last N periods" support)
-- **v8.48.1** - Critical Hotfix - Startup Failure Fix (redundant calendar import removed, immediate upgrade required)
-- **v8.48.0** - CSV-Based Metadata Compression (78% size reduction, 100% sync success, metadata validation)
-- **v8.47.1** - ONNX Quality Evaluation Bug Fixes (self-match fix, association pollution, sync queue overflow, realistic distribution)
-- **v8.47.0** - Association-Based Quality Boost (connection-based enhancement, network effect leverage, metadata persistence)
-- **v8.46.3** - Quality Score Persistence Fix (ONNX scores in hybrid backend, metadata normalization)
-- **v8.46.2** - Session-Start Hook Crash Fix + Hook Installer Improvements (client-side tag filtering, isolated version metadata)
-- **v8.46.1** - Windows Hooks Installer Fix + Quality System Integration (UTF-8 console configuration, backend quality scoring)
-- **v8.45.3** - ONNX Ranker Model Export Fix (automatic model export, offline mode support, 7-16ms CPU performance)
-- **v8.45.2** - Dashboard Dark Mode Consistency Fixes (global CSS overrides, Chart.js dark mode support)
-- **v8.45.1** - Quality System Test Infrastructure Fixes (HTTP API router, storage retrieval, async test client)
-- **v8.45.0** - Memory Quality System - AI-Driven Automatic Quality Scoring (ONNX-powered local SLM, multi-tier fallback, quality-based retention)
-- **v8.44.0** - Multi-Language Expansion (Japanese, Korean, German, French, Spanish - 359 keys each, complete i18n coverage)
-- **v8.43.0** - Internationalization & Quality Automation (English/Chinese i18n, Claude branch automation, quality gates)
-- **v8.42.1** - MCP Resource Handler Fix (`AttributeError` with Pydantic AnyUrl objects)
-- **v8.42.0** - Memory Awareness Enhancements (visible memory injection, quality session summaries, LLM-powered summarization)
-- **v8.41.2** - Hook Installer Utility File Deployment (ALL 14 utilities copied, future-proof glob pattern)
-- **v8.41.1** - Context Formatter Memory Sorting (recency sorting within categories, newest first)
-- **v8.41.0** - Session Start Hook Reliability Improvements (error suppression, clean output, memory filtering, classification fixes)
-- **v8.40.0** - Session Start Version Display (automatic version comparison, PyPI status labels)
-- **v8.39.1** - Dashboard Analytics Bug Fixes: Three critical fixes (top tags filtering, recent activity display, storage report fields)
-- **v8.39.0** - Performance Optimization: Storage-layer date-range filtering (10x faster analytics, 97% data transfer reduction)
-- **v8.38.1** - Critical Hotfix: HTTP MCP JSON-RPC 2.0 compliance fix (Claude Code/Desktop connection failures resolved)
-- **v8.38.0** - Code Quality: Phase 2b COMPLETE (~176-186 lines duplicate code eliminated, 10 consolidations)
-- **v8.37.0** - Code Quality: Phase 2a COMPLETE (5 duplicate high-complexity functions eliminated)
-- **v8.36.1** - Critical Hotfix: HTTP server startup crash fix (forward reference error in analytics.py)
-- **v8.36.0** - Code Quality: Phase 2 COMPLETE (100% of target achieved, -39 complexity points)
-- **v8.35.0** - Code Quality: Phase 2 Batch 1 (install.py, cloudflare.py, -15 complexity points)
-- **v8.34.0** - Code Quality: Phase 2 Complexity Reduction (analytics.py refactored, 11 → 6-7 complexity)
-- **v8.33.0** - Critical Installation Bug Fix + Code Quality Improvements (dead code cleanup, automatic MCP setup)
-- **v8.32.0** - Code Quality Excellence: pyscn Static Analysis Integration (multi-layer QA workflow)
-- **v8.31.0** - Revolutionary Batch Update Performance (21,428x faster memory consolidation)
-- **v8.30.0** - Analytics Intelligence: Adaptive Charts & Critical Data Fixes (accurate trend visualization)
-- **v8.28.1** - Critical HTTP MCP Transport JSON-RPC 2.0 Compliance Fix (Claude Code compatibility)
-- **v8.28.0** - Cloudflare AND/OR Tag Filtering (unified search API, 3-5x faster hybrid sync)
-- **v8.27.1** - Critical Hotfix: Timestamp Regression (created_at preservation during metadata sync)
-- **v8.26.0** - Revolutionary MCP Performance (534,628x faster tools, 90%+ cache hit rate)
-- **v8.25.0** - Hybrid Backend Drift Detection (automatic metadata sync, bidirectional awareness)
-- **v8.24.4** - Code Quality Improvements from Gemini Code Assist (regex sanitization, DOM caching)
-- **v8.24.3** - Test Coverage & Release Agent Improvements (tag+time filtering tests, version history fix)
-- **v8.24.2** - CI/CD Workflow Fixes (bash errexit handling, exit code capture)
-- **v8.24.1** - Test Infrastructure Improvements (27 test failures resolved, 63% → 71% pass rate)
-- **v8.24.0** - PyPI Publishing Enabled (automated package publishing via GitHub Actions)
-- **v8.23.1** - Stale Virtual Environment Prevention System (6-layer developer protection)
-- **v8.23.0** - Consolidation Scheduler via Code Execution API (88% token reduction)
-
-**📖 Full Details**: [CHANGELOG.md](CHANGELOG.md#8222---2025-11-09) | [All Releases](https://github.com/doobidoo/mcp-memory-service/releases)
-
----
-
-## 📚 Documentation & Resources
-
-- **[Installation Guide](docs/installation.md)** – Detailed setup instructions
-- **[Configuration Guide](docs/mastery/configuration-guide.md)** – Backend options and customization
-- **[Architecture Overview](docs/architecture.md)** – How it works under the hood
-- **[Team Setup Guide](docs/teams.md)** – OAuth and cloud collaboration
-- **[Troubleshooting](docs/troubleshooting/)** – Common issues and solutions
-- **[API Reference](docs/api.md)** – Programmatic usage
-- **[Wiki](https://github.com/doobidoo/mcp-memory-service/wiki)** – Complete documentation
-- [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/doobidoo/mcp-memory-service) – AI-powered documentation assistant
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-**Quick Development Setup:**
-```bash
-git clone https://github.com/doobidoo/mcp-memory-service.git
-cd mcp-memory-service
-pip install -e .  # Editable install
-pytest tests/      # Run test suite
-```
-
----
-
-## ⭐ Support
-
-If this saves you time, give us a star! ⭐
-
-- **Issues**: [GitHub Issues](https://github.com/doobidoo/mcp-memory-service/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/doobidoo/mcp-memory-service/discussions)
-- **Wiki**: [Documentation Wiki](https://github.com/doobidoo/mcp-memory-service/wiki)
-
----
-
-## 📄 License
-
-Apache 2.0 – See [LICENSE](LICENSE) for details.
-
----
-
-<p align="center">
-  <strong>Never explain your project to AI twice.</strong><br/>
-  Start using MCP Memory Service today.
-</p>
-
-## ⚠️ v6.17.0+ Script Migration Notice
-
-**Updating from an older version?** Scripts have been reorganized for better maintainability:
-- **Recommended**: Use `python -m mcp_memory_service.server` in your Claude Desktop config (no path dependencies!)
-- **Alternative 1**: Use `uv run memory server` with UV tooling
-- **Alternative 2**: Update path from `scripts/run_memory_server.py` to `scripts/server/run_memory_server.py`
-- **Backward compatible**: Old path still works with a migration notice
-
-## ⚠️ First-Time Setup Expectations
-
-On your first run, you'll see some warnings that are **completely normal**:
-
-- **"WARNING: Failed to load from cache: No snapshots directory"** - The service is checking for cached models (first-time setup)
-- **"WARNING: Using TRANSFORMERS_CACHE is deprecated"** - Informational warning, doesn't affect functionality
-- **Model download in progress** - The service automatically downloads a ~25MB embedding model (takes 1-2 minutes)
-
-These warnings disappear after the first successful run. The service is working correctly! For details, see our [First-Time Setup Guide](docs/first-time-setup.md).
-
-### 🐍 Python 3.13 Compatibility Note
-
-**sqlite-vec** may not have pre-built wheels for Python 3.13 yet. If installation fails:
-- The installer will automatically try multiple installation methods
-- Consider using Python 3.12 for the smoothest experience: `brew install python@3.12`
-- Alternative: Use Cloudflare backend with `--storage-backend cloudflare`
-- See [Troubleshooting Guide](docs/troubleshooting/general.md#python-313-sqlite-vec-issues) for details
-
-### 🍎 macOS SQLite Extension Support
-
-**macOS users** may encounter `enable_load_extension` errors with sqlite-vec:
-- **System Python** on macOS lacks SQLite extension support by default
-- **Solution**: Use Homebrew Python: `brew install python && rehash`
-- **Alternative**: Use pyenv: `PYTHON_CONFIGURE_OPTS='--enable-loadable-sqlite-extensions' pyenv install 3.12.0`
-- **Fallback**: Use Cloudflare or Hybrid backend: `--storage-backend cloudflare` or `--storage-backend hybrid`
-- See [Troubleshooting Guide](docs/troubleshooting/general.md#macos-sqlite-extension-issues) for details
-
-## 🎯 Memory Awareness in Action
-
-**Intelligent Context Injection** - See how the memory service automatically surfaces relevant information at session start:
-
-<img src="docs/assets/images/memory-awareness-hooks-example.png" alt="Memory Awareness Hooks in Action" width="100%" />
-
-**What you're seeing:**
-- 🧠 **Automatic memory injection** - 8 relevant memories found from 2,526 total
-- 📂 **Smart categorization** - Recent Work, Current Problems, Additional Context
-- 📊 **Git-aware analysis** - Recent commits and keywords automatically extracted
-- 🎯 **Relevance scoring** - Top memories scored at 100% (today), 89% (8d ago), 84% (today)
-- ⚡ **Fast retrieval** - SQLite-vec backend with 5ms read performance
-- 🔄 **Background sync** - Hybrid backend syncing to Cloudflare
-
-**Result**: Claude starts every session with full project context - no manual prompting needed.
-
-## 📚 Complete Documentation
-
-**👉 Visit our comprehensive [Wiki](https://github.com/doobidoo/mcp-memory-service/wiki) for detailed guides:**
-
-### 🧠 v7.1.3 Natural Memory Triggers (Latest)
-- **[Natural Memory Triggers v7.1.3 Guide](https://github.com/doobidoo/mcp-memory-service/wiki/Natural-Memory-Triggers-v7.1.0)** - Intelligent automatic memory awareness
-  - ✅ **85%+ trigger accuracy** with semantic pattern detection
-  - ✅ **Multi-tier performance** (50ms instant → 150ms fast → 500ms intensive)
-  - ✅ **CLI management system** for real-time configuration
-  - ✅ **Git-aware context** integration for enhanced relevance
-  - ✅ **Zero-restart installation** with dynamic hook loading
-
-### 🆕 v7.0.0 OAuth & Team Collaboration
-- **[🔐 OAuth 2.1 Setup Guide](https://github.com/doobidoo/mcp-memory-service/wiki/OAuth-2.1-Setup-Guide)** - **NEW!** Complete OAuth 2.1 Dynamic Client Registration guide
-- **[🔗 Integration Guide](https://github.com/doobidoo/mcp-memory-service/wiki/03-Integration-Guide)** - Claude Desktop, **Claude Code HTTP transport**, VS Code, and more
-- **[🛡️ Advanced Configuration](https://github.com/doobidoo/mcp-memory-service/wiki/04-Advanced-Configuration)** - **Updated!** OAuth security, enterprise features
-
-### 🧬 v8.23.0+ Memory Consolidation
-- **[📊 Memory Consolidation System Guide](https://github.com/doobidoo/mcp-memory-service/wiki/Memory-Consolidation-System-Guide)** - **NEW!** Automated memory maintenance with real-world performance metrics
-  - ✅ **Dream-inspired consolidation** (decay scoring, association discovery, compression, archival)
-  - ✅ **24/7 automatic scheduling** (daily/weekly/monthly via HTTP server)
-  - ✅ **Token-efficient Code Execution API** (90% token reduction vs MCP tools)
-  - ✅ **Real-world performance data** (4-6 min for 2,495 memories with hybrid backend)
-  - ✅ **Three manual trigger methods** (HTTP API, MCP tools, Python API)
-
-### 🚀 Setup & Installation
-- **[📋 Installation Guide](https://github.com/doobidoo/mcp-memory-service/wiki/01-Installation-Guide)** - Complete installation for all platforms and use cases
-- **[🖥️ Platform Setup Guide](https://github.com/doobidoo/mcp-memory-service/wiki/02-Platform-Setup-Guide)** - Windows, macOS, and Linux optimizations
-- **[⚡ Performance Optimization](https://github.com/doobidoo/mcp-memory-service/wiki/05-Performance-Optimization)** - Speed up queries, optimize resources, scaling
-
-### 🧠 Advanced Topics
-- **[👨‍💻 Development Reference](https://github.com/doobidoo/mcp-memory-service/wiki/06-Development-Reference)** - Claude Code hooks, API reference, debugging
-- **[🔧 Troubleshooting Guide](https://github.com/doobidoo/mcp-memory-service/wiki/07-TROUBLESHOOTING)** - **Updated!** OAuth troubleshooting + common issues
-- **[❓ FAQ](https://github.com/doobidoo/mcp-memory-service/wiki/08-FAQ)** - Frequently asked questions
-- **[📝 Examples](https://github.com/doobidoo/mcp-memory-service/wiki/09-Examples)** - Practical code examples and workflows
-
-### 📂 Internal Documentation
-- **[📊 Repository Statistics](docs/statistics/REPOSITORY_STATISTICS.md)** - 10 months of development metrics, activity patterns, and insights
-- **[🏗️ Architecture Specs](docs/architecture/)** - Search enhancement specifications and design documents
-- **[👩‍💻 Development Docs](docs/development/)** - AI agent instructions, release checklist, refactoring notes
-- **[🚀 Deployment Guides](docs/deployment/)** - Docker, dual-service, and production deployment
-- **[📚 Additional Guides](docs/guides/)** - Storage backends, migration, mDNS discovery
-
-## ✨ Key Features
-
-### 🏆 **Production-Ready Reliability** 🆕 v8.9.0
-- **Hybrid Backend** - Fast 5ms local SQLite + background Cloudflare sync (RECOMMENDED default)
-  - Zero user-facing latency for cloud operations
-  - Automatic multi-device synchronization
-  - Graceful offline operation
-- **Zero Database Locks** - Concurrent HTTP + MCP server access works flawlessly
-  - Auto-configured SQLite pragmas (`busy_timeout=15000,cache_size=20000`)
-  - WAL mode with proper multi-client coordination
-  - Tested: 5/5 concurrent writes succeeded with no errors
-- **Auto-Configuration** - Installer handles everything
-  - SQLite pragmas for concurrent access
-  - Cloudflare credentials with connection testing
-  - Claude Desktop integration with hybrid backend
-  - Graceful fallback to sqlite_vec if cloud setup fails
-
-### 📄 **Document Ingestion System** v8.6.0
-- **Interactive Web UI** - Drag-and-drop document upload with real-time progress
-- **Multiple Formats** - PDF, TXT, MD, JSON with intelligent chunking
-- **Document Viewer** - Browse chunks, view metadata, search content
-- **Smart Tagging** - Automatic tagging with length validation (max 100 chars)
-- **Optional semtools** - Enhanced PDF/DOCX/PPTX parsing with LlamaParse
-- **Security Hardened** - Path traversal protection, XSS prevention, input validation
-- **7 New Endpoints** - Complete REST API for document management
-
-### 🔐 **Enterprise Authentication & Team Collaboration**
-- **OAuth 2.1 Dynamic Client Registration** - RFC 7591 & RFC 8414 compliant
-- **Claude Code HTTP Transport** - Zero-configuration team collaboration
-- **JWT Authentication** - Enterprise-grade security with scope validation
-- **Auto-Discovery Endpoints** - Seamless client registration and authorization
-- **Multi-Auth Support** - OAuth + API keys + optional anonymous access
-
-### 🧠 **Intelligent Memory Management**
-- **Semantic search** with vector embeddings
-- **Natural language time queries** ("yesterday", "last week")
-- **Tag-based organization** with smart categorization
-- **Memory consolidation** with dream-inspired algorithms
-- **Document-aware search** - Query across uploaded documents and manual memories
-
-### 🔗 **Universal Compatibility**
-- **Claude Desktop** - Native MCP integration
-- **Claude Code** - **HTTP transport** + Memory-aware development with hooks
-  - 🪟 **Windows Support**: `/session-start` command for manual session initialization (workaround for issue #160)
-  - 🍎 **macOS/Linux**: Full automatic SessionStart hooks + slash command
-- **VS Code, Cursor, Continue** - IDE extensions
-- **13+ AI applications** - REST API compatibility
-
-### 💾 **Flexible Storage**
-- **Hybrid** 🌟 (RECOMMENDED) - Fast local SQLite + background Cloudflare sync (v8.9.0 default)
-  - 5ms local reads with zero user-facing latency
-  - Multi-device synchronization
-  - Zero database locks with auto-configured pragmas
-  - Automatic backups and cloud persistence
-- **SQLite-vec** - Local-only storage (lightweight ONNX embeddings, 5ms reads)
-  - Good for single-user offline use
-  - No cloud dependencies
-- **Cloudflare** - Cloud-only storage (global edge distribution with D1 + Vectorize)
-  - Network-dependent performance
-
-> **Note**: All heavy ML dependencies (PyTorch, sentence-transformers) are now optional to dramatically reduce build times and image sizes. SQLite-vec uses lightweight ONNX embeddings by default. Install with `--with-ml` for full ML capabilities.
-
-### 🚀 **Production Ready**
-- **Cross-platform** - Windows, macOS, Linux
-- **Service installation** - Auto-start background operation
-- **HTTPS/SSL** - Secure connections with OAuth 2.1
-- **Docker support** - Easy deployment with team collaboration
-- **Interactive Dashboard** - Web UI at http://127.0.0.1:8000/ for complete management
-
-## 💡 Basic Usage
-
-### 📄 **Document Ingestion** (v8.6.0+)
-```bash
-# Start HTTP dashboard server (separate from MCP server)
-uv run python scripts/server/run_http_server.py
-
-# Access interactive dashboard
-open http://127.0.0.1:8000/
-
-# Upload documents via CLI
-curl -X POST http://127.0.0.1:8000/api/documents/upload \
-  -F "file=@document.pdf" \
-  -F "tags=documentation,reference"
-
-# Search document content
-curl -X POST http://127.0.0.1:8000/api/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "authentication flow", "limit": 10}'
-```
-
-### 🔗 **Team Collaboration with OAuth** (v7.0.0+)
-```bash
-# Start OAuth-enabled HTTP server for team collaboration
-export MCP_OAUTH_ENABLED=true
-uv run python scripts/server/run_http_server.py
-
-# Claude Code team members connect via HTTP transport
-claude mcp add --transport http memory-service http://your-server:8000/mcp
-# → Automatic OAuth discovery, registration, and authentication
-```
-
-### 🧠 **Memory Operations**
-```bash
-# Store a memory
-uv run memory store "Fixed race condition in authentication by adding mutex locks"
-
-# Search for relevant memories
-uv run memory recall "authentication race condition"
-
-# Search by tags
-uv run memory search --tags python debugging
-
-# Check system health (shows OAuth status)
-uv run memory health
-```
-
-## 🔧 Configuration
-
-### Claude Desktop Integration
-**Recommended approach** - Add to your Claude Desktop config (`~/.claude/config.json`):
+Then in your Claude Code or Claude Desktop config:
 
 ```json
 {
   "mcpServers": {
     "memory": {
-      "command": "python",
-      "args": ["-m", "mcp_memory_service.server"],
-      "env": {
-        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
-      }
+      "type": "http",
+      "url": "http://localhost:8001/mcp"
     }
   }
 }
 ```
 
-**Alternative approaches:**
+The server speaks streamable HTTP natively via FastMCP 2.0 — no `mcp-remote` bridge, no `npx` shims, no Node.js. Your MCP client connects directly.
+
+### From Source (stdio)
+
+For local development or if you prefer the MCP stdio transport:
+
+```bash
+git clone https://github.com/27b-io/mcp-memory-service.git
+cd mcp-memory-service
+uv sync
+uv run memory server
+```
+
 ```json
-// Option 1: UV tooling (if using UV)
 {
   "mcpServers": {
     "memory": {
       "command": "uv",
-      "args": ["--directory", "/path/to/mcp-memory-service", "run", "memory", "server"],
-      "env": {
-        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
-      }
-    }
-  }
-}
-
-// Option 2: Direct script path (v6.17.0+)
-{
-  "mcpServers": {
-    "memory": {
-      "command": "python",
-      "args": ["/path/to/mcp-memory-service/scripts/server/run_memory_server.py"],
-      "env": {
-        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
-      }
+      "args": ["run", "--directory", "/path/to/mcp-memory-service", "memory", "server"]
     }
   }
 }
 ```
 
-### Environment Variables
+## Architecture
 
-**Hybrid Backend (v8.9.0+ RECOMMENDED):**
+```text
+                         ┌─────────────────────────────────┐
+  Claude Desktop         │        MCP Memory Service       │
+  Claude Code     ──MCP──│                                 │
+  VS Code / Cursor       │  ┌───────────────────────────┐  │
+  Any MCP Client         │  │     5 MCP Tools            │  │
+                         │  │  store · search · delete   │  │
+                         │  │  health · relation         │  │
+                         │  └─────────┬─────────────────┘  │
+                         │            │                     │
+                         │  ┌─────────▼─────────────────┐  │
+                         │  │    Memory Service          │  │
+                         │  │                            │  │
+                         │  │  Hybrid RRF Search         │  │
+                         │  │  Emotional Analysis        │  │
+                         │  │  Interference Detection    │  │
+                         │  │  Salience Scoring          │  │
+                         │  │  Spaced Repetition         │  │
+                         │  │  Three-Tier Memory         │  │
+                         │  └──┬──────────────────┬─────┘  │
+                         │     │                  │         │
+                         │  ┌──▼───────┐  ┌──────▼──────┐  │
+                         │  │  Qdrant  │  │  FalkorDB   │  │
+                         │  │ (vector) │  │  (graph)    │  │
+                         │  └──────────┘  └─────────────┘  │
+                         └─────────────────────────────────┘
+```
+
+Every memory stored gets vectorized, emotionally tagged, checked for contradictions against existing memories, and scored for salience. Retrieval uses Reciprocal Rank Fusion to blend semantic similarity with tag matching, then applies recency decay, Hebbian co-access boosting, and spaced repetition signals. It's a lot happening behind a simple `store_memory` / `search` interface.
+
+## MCP Tools
+
+Five tools. That's it. Down from 16 in earlier versions — because your LLM's context window isn't free real estate.
+
+| Tool | What it does |
+|------|-------------|
+| **store_memory** | Persist content with tags, metadata, and automatic cognitive processing (emotional analysis, contradiction detection, salience scoring). Auto-splits large content. |
+| **search** | Unified retrieval across 5 modes: `hybrid`, `scan`, `similar`, `tag`, `recent`. One tool, multiple strategies. |
+| **delete_memory** | Permanently remove a memory by content hash. |
+| **check_database_health** | Backend status, memory count, storage stats. |
+| **relation** | Create, query, or delete typed edges in the knowledge graph (RELATES_TO, PRECEDES, CONTRADICTS). |
+
+### Search Modes
+
+The `search` tool's `mode` parameter selects the retrieval strategy:
+
+| Mode | When to use it | Requires query? |
+|------|---------------|-----------------|
+| **hybrid** (default) | General-purpose. Semantic search + tag boosting with adaptive corpus-aware weighting. | Yes |
+| **scan** | Token-budget triage. Returns ~50-token summaries instead of full content. | Yes |
+| **similar** | Duplicate detection. Pure k-NN vector similarity, no tag boosting. | Yes |
+| **tag** | Category lookup. Exact tag matching with AND/OR logic. | No (needs `tags`) |
+| **recent** | Timeline browsing. Newest first, optional tag/type filter. | No |
+
+Results come back in TOON format (pipe-delimited, ~83% smaller than JSON) for `hybrid`, `tag`, and `recent` modes. `scan` and `similar` return structured dicts.
+
+### Three-Tier Memory (Optional)
+
+Behind `MCP_THREE_TIER_EXPOSE_TOOLS=true`, five additional tools expose a Cowan's embedded-processes memory model:
+
+| Tier | Capacity | TTL | Purpose |
+|------|----------|-----|---------|
+| Sensory Buffer | ~7 items | 1 second | Raw input capture (ring buffer) |
+| Working Memory | ~4 chunks | 30 minutes | Active task context (LRU eviction) |
+| Long-Term | Unlimited | Permanent | Qdrant persistent storage |
+
+Items accessed 2+ times in working memory auto-consolidate to long-term storage. These tiers are ephemeral and session-scoped — they don't touch the database until consolidation fires.
+
+## Cognitive Features
+
+These run automatically on every `store_memory` and `search` call. No configuration needed (but you can tune or disable each one).
+
+**Emotional Analysis** — Keyword-based sentiment detection across 8 categories (joy, frustration, urgency, curiosity, concern, excitement, sadness, confidence). Handles negation and intensifiers. No ML model needed.
+
+**Salience Scoring** — Weighted combination of emotional magnitude, access frequency, and explicit importance. High-salience memories get a retrieval boost (up to +15%).
+
+**Interference Detection** — At store time, new memories are checked against existing ones for contradictions via four signal types: negation asymmetry, antonym pairs, temporal supersession ("no longer X, now Y"), and sentiment flips. Contradictions are flagged (not blocked) and recorded as CONTRADICTS edges in the knowledge graph.
+
+**Spaced Repetition** — Memories accessed at expanding intervals (1h, 1d, 1w) get a retrieval boost. Based on Ebbinghaus spacing effect. Adaptive LTP prevents runaway potentiation (BCM theory).
+
+**Hebbian Learning** — Co-retrieved memories form implicit association edges in the knowledge graph. Weights strengthen on co-access and decay over time. Used for spreading activation during search (BFS up to 2 hops).
+
+**Hybrid Search (RRF)** — Reciprocal Rank Fusion blends vector similarity with tag matching. Alpha adapts to corpus size: balanced at <500 memories, semantic-biased at 5000+. Optional recency decay with configurable half-life (~70 days default).
+
+## Knowledge Graph
+
+Optional FalkorDB layer for typed relationships between memories.
+
+**Explicit edges** (created via `relation` tool):
+- `RELATES_TO` — generic semantic link
+- `PRECEDES` — temporal/causal ordering
+- `CONTRADICTS` — conflicting information (also auto-created by interference detection)
+
+**Implicit edges** (created automatically):
+- `HEBBIAN` — co-access associations, weight modulated by adaptive LTP
+
+Graph features: spreading activation search boost, consolidation pruning, async write queue (CQRS pattern to avoid blocking reads).
+
+## TOON Format
+
+Terser Object Notation — a pipe-delimited output format optimized for LLM token budgets.
+
+```text
+# page=1 total=42 page_size=10 has_more=true total_pages=5
+Meeting notes about auth redesign|planning,auth|{"priority":"high"}|2026-01-15T10:30:00Z|2026-01-15T10:30:00Z|abc123|0.95
+Fixed race condition in worker pool|bugfix,concurrency|{}|2026-01-14T09:00:00Z|2026-01-14T09:00:00Z|def456|0.87
+```
+
+~83% fewer tokens than equivalent JSON. The format spec is available as an MCP resource at `toon://format/documentation`.
+
+## Docker Image Variants
+
+The Dockerfile produces two targets:
+
+| Target | Size | Embedding | Use case |
+|--------|------|-----------|----------|
+| **full** (default) | ~1.2 GB | In-process SentenceTransformer | Single-node, `docker compose up` |
+| **slim** | ~200 MB | External (TEI/vLLM/Ollama) | Scale-out, separate embedding service |
+
+`docker build .` produces the `full` image (backward compatible). For the slim image:
+
 ```bash
-# Hybrid backend with auto-configured pragmas
-export MCP_MEMORY_STORAGE_BACKEND=hybrid
-export MCP_MEMORY_SQLITE_PRAGMAS="busy_timeout=15000,cache_size=20000"
+# Build locally
+docker build --target slim -t mcp-memory:slim .
 
-# Cloudflare credentials (required for hybrid)
-export CLOUDFLARE_API_TOKEN="your-token"
-export CLOUDFLARE_ACCOUNT_ID="your-account"
-export CLOUDFLARE_D1_DATABASE_ID="your-db-id"
-export CLOUDFLARE_VECTORIZE_INDEX="mcp-memory-index"
-
-# Enable HTTP API
-export MCP_HTTP_ENABLED=true
-export MCP_HTTP_PORT=8000
-
-# Security
-export MCP_API_KEY="your-secure-key"
+# Or pull from GHCR
+docker pull ghcr.io/27b-io/mcp-memory-service:latest-slim
 ```
 
-**SQLite-vec Only (Local):**
+### Split Deployment (API + External Embedding)
+
+For production scale-out, use `docker-compose.prod.yml` which deploys a thin API container with a separate HuggingFace TEI embedding service:
+
 ```bash
-# Local-only storage
-export MCP_MEMORY_STORAGE_BACKEND=sqlite_vec
-export MCP_MEMORY_SQLITE_PRAGMAS="busy_timeout=15000,cache_size=20000"
+docker compose -f docker-compose.prod.yml up
 ```
 
-## 🏗️ Architecture
+This gives you:
+- **api** — Thin MCP service (~200MB, <2s cold start, no GPU needed)
+- **embedding** — HuggingFace TEI serving the embedding model
+- **qdrant** — Vector database
 
+Only the API port (8000) is exposed to the host. Backend services communicate on the internal Docker network.
+
+## Configuration
+
+All config via environment variables. Pydantic-settings under the hood — type-safe, validated, with sensible defaults.
+
+### Storage
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_MEMORY_STORAGE_BACKEND` | `qdrant` | `qdrant` or `sqlite_vec` |
+| `MCP_MEMORY_EMBEDDING_MODEL` | `nomic-ai/nomic-embed-text-v1.5` | HuggingFace model (768-dim, 8K context) |
+| `MCP_MEMORY_USE_ONNX` | `false` | ONNX runtime for CPU optimization |
+| `MCP_QDRANT_URL` | — | Remote Qdrant server (omit for embedded mode) |
+| `MCP_QDRANT_STORAGE_PATH` | Platform default | Local Qdrant data path |
+
+### Embedding Provider
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_EMBEDDING_PROVIDER` | `local` | `local` (in-process) or `openai_compat` (HTTP) |
+| `MCP_EMBEDDING_URL` | — | Base URL for HTTP embedding service (required for `openai_compat`) |
+| `MCP_EMBEDDING_TIMEOUT` | `30` | Request timeout in seconds (1-300) |
+| `MCP_EMBEDDING_MAX_BATCH` | `64` | Max texts per batch request (1-1024) |
+| `MCP_EMBEDDING_DIMENSIONS` | auto-detect | Override embedding dimensions |
+| `MCP_EMBEDDING_TLS_VERIFY` | `true` | TLS certificate verification for HTTP provider |
+| `MCP_EMBEDDING_API_KEY` | — | API key for managed embedding providers |
+
+### Cognitive Features
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_SALIENCE_ENABLED` | `true` | Emotional tagging + salience scoring |
+| `MCP_INTERFERENCE_ENABLED` | `true` | Contradiction detection at store time |
+| `MCP_SPACED_REPETITION_ENABLED` | `true` | Spacing-quality retrieval boost |
+| `MCP_ENCODING_CONTEXT_ENABLED` | `true` | Context-dependent retrieval |
+| `MCP_MEMORY_HYBRID_ALPHA` | — | Override adaptive alpha (0.0-1.0) |
+| `MCP_MEMORY_RECENCY_DECAY` | `0.01` | Temporal decay rate (~70-day half-life) |
+
+### Three-Tier Memory
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_THREE_TIER_ENABLED` | `true` | Enable sensory/working memory tiers |
+| `MCP_THREE_TIER_EXPOSE_TOOLS` | `false` | Register as MCP tools |
+| `MCP_THREE_TIER_SENSORY_CAPACITY` | `7` | Sensory buffer size |
+| `MCP_THREE_TIER_WORKING_CAPACITY` | `4` | Working memory slots |
+
+### Content Handling
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_ENABLE_AUTO_SPLIT` | `true` | Auto-chunk large content |
+| `MCP_CONTENT_SPLIT_OVERLAP` | `50` | Chunk overlap (chars) |
+| `MCP_CONTENT_PRESERVE_BOUNDARIES` | `true` | Respect sentence/paragraph breaks |
+
+### HTTP Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_HTTP_ENABLED` | `false` | Enable HTTP/REST interface |
+| `MCP_HTTP_PORT` | `8000` | Listen port |
+| `MCP_HTTP_HOST` | `0.0.0.0` | Bind address |
+
+### Summary Generation
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_SUMMARY_MODE` | auto-detect | `extractive` or `llm` |
+| `MCP_SUMMARY_PROVIDER` | `anthropic` | `anthropic` or `gemini` |
+
+## Storage Backends
+
+| Backend | Best for | Notes |
+|---------|----------|-------|
+| **Qdrant** | Production | HNSW index, scalar quantization option (32x memory savings), embedded or remote mode. Default. |
+| **SQLite-vec** | Lightweight / Docker | CPU-only, zero external dependencies. Docker images default to this via env var. |
+
+Both implement the `MemoryStorage` protocol. Swap with one env var.
+
+## Development
+
+```text
+src/mcp_memory_service/
+├── mcp_server.py              # 5 MCP tools (+ optional three-tier)
+├── config.py                  # Pydantic settings
+├── memory_tiers.py            # Cowan's three-tier model
+├── services/
+│   └── memory_service.py      # Core business logic
+├── embedding/
+│   ├── protocol.py            # EmbeddingProvider protocol
+│   ├── local.py               # In-process SentenceTransformer
+│   ├── http.py                # OpenAI-compatible HTTP adapter
+│   ├── cached.py              # CacheKit L1/L2 wrapper
+│   └── factory.py             # Provider factory
+├── storage/
+│   ├── base.py                # Storage protocol (ABC)
+│   ├── qdrant_storage.py      # Qdrant backend
+│   └── factory.py             # Backend factory
+├── graph/
+│   ├── schema.py              # FalkorDB Cypher schema
+│   ├── client.py              # Graph operations
+│   └── queue.py               # Async write queue
+├── formatters/
+│   └── toon.py                # TOON encoder
+├── utils/
+│   ├── emotional_analysis.py  # Sentiment detection
+│   ├── interference.py        # Contradiction signals
+│   ├── salience.py            # Importance scoring
+│   ├── spaced_repetition.py   # Spacing + LTP
+│   ├── hybrid_search.py       # RRF + adaptive alpha
+│   ├── content_splitter.py    # Auto-chunking
+│   └── summariser.py          # LLM/extractive summaries
+└── models/
+    └── memory.py              # Memory dataclass
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   AI Clients    │    │  MCP Memory     │    │ Storage Backend │
-│                 │    │  Service v8.9   │    │                 │
-│ • Claude Desktop│◄──►│ • MCP Protocol  │◄──►│ • Hybrid 🌟     │
-│ • Claude Code   │    │ • HTTP Transport│    │   (5ms local +  │
-│   (HTTP/OAuth)  │    │ • OAuth 2.1 Auth│    │    cloud sync)  │
-│ • VS Code       │    │ • Memory Store  │    │ • SQLite-vec    │
-│ • Cursor        │    │ • Semantic      │    │ • Cloudflare    │
-│ • 13+ AI Apps   │    │   Search        │    │                 │
-│ • Web Dashboard │    │ • Doc Ingestion │    │ Zero DB Locks ✅│
-│   (Port 8000)   │    │ • Zero DB Locks │    │ Auto-Config ✅  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+
+### Running Tests
+
+```bash
+# Full suite
+uv run pytest tests/
+
+# Fast (skip slow integration tests)
+uv run pytest -x -m "not slow"
+
+# Quality gates
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
 ```
 
-## 🛠️ Development
+### Embedding Models
 
-### Project Structure
-```
-mcp-memory-service/
-├── src/mcp_memory_service/    # Core application
-│   ├── models/                # Data models
-│   ├── storage/               # Storage backends
-│   ├── web/                   # HTTP API & dashboard
-│   └── server.py              # MCP server
-├── scripts/                   # Utilities & installation
-├── tests/                     # Test suite
-└── tools/docker/              # Docker configuration
-```
+| Model | Dimensions | Notes |
+|-------|-----------|-------|
+| **nomic-ai/nomic-embed-text-v1.5** | 768 | Default. 8K context, good balance. |
+| intfloat/e5-small-v2 | 384 | Speed over accuracy |
+| intfloat/e5-base-v2 | 768 | Previous default |
+| intfloat/e5-large-v2 | 1024 | Best quality |
+| Snowflake/snowflake-arctic-embed-m-v2.0 | 768 | Alternative |
 
-### Contributing
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Submit a pull request
+Switching models requires re-embedding existing memories. There's a migration script for that: `scripts/migrate_embeddings.py`.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+## License
 
-## 🆘 Support
-
-- **📖 Documentation**: [Wiki](https://github.com/doobidoo/mcp-memory-service/wiki) - Comprehensive guides
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/doobidoo/mcp-memory-service/issues)
-- **💬 Discussions**: [GitHub Discussions](https://github.com/doobidoo/mcp-memory-service/discussions)
-- **🔧 Troubleshooting**: [Troubleshooting Guide](https://github.com/doobidoo/mcp-memory-service/wiki/07-TROUBLESHOOTING)
-- **✅ Configuration Validator**: Run `python scripts/validation/validate_configuration_complete.py` to check your setup
-- **🔄 Backend Sync Tools**: See [scripts/README.md](scripts/README.md#backend-synchronization) for Cloudflare↔SQLite sync
-
-## 📊 In Production
-
-**Real-world metrics from active deployments:**
-- **1700+ memories** stored and actively used across teams
-- **5ms local reads** with hybrid backend (v8.9.0)
-- **Zero database locks** with concurrent HTTP + MCP access (v8.9.0)
-  - Tested: 5/5 concurrent writes succeeded
-  - Auto-configured pragmas prevent lock errors
-- **<500ms response time** for semantic search (local & HTTP transport)
-- **65% token reduction** in Claude Code sessions with OAuth collaboration
-- **96.7% faster** context setup (15min → 30sec)
-- **100% knowledge retention** across sessions and team members
-- **Zero-configuration** setup success rate: **98.5%** (OAuth + hybrid backend)
-
-## 🏆 Recognition
-
-- [![Smithery](https://smithery.ai/badge/@doobidoo/mcp-memory-service)](https://smithery.ai/server/@doobidoo/mcp-memory-service) **Verified MCP Server**
-- [![Glama AI](https://img.shields.io/badge/Featured-Glama%20AI-blue)](https://glama.ai/mcp/servers/bzvl3lz34o) **Featured AI Tool**
-- **Production-tested** across 13+ AI applications
-- **Community-driven** with real-world feedback and improvements
-
-## 📄 License
-
-Apache License 2.0 - see [LICENSE](LICENSE) for details.
-
----
-
-**Ready to supercharge your AI workflow?** 🚀
-
-👉 **[Start with our Installation Guide](https://github.com/doobidoo/mcp-memory-service/wiki/01-Installation-Guide)** or explore the **[Wiki](https://github.com/doobidoo/mcp-memory-service/wiki)** for comprehensive documentation.
-
-*Transform your AI conversations into persistent, searchable knowledge that grows with you.*
+[WTFPL](LICENSE) — Do What The Fuck You Want To Public License.

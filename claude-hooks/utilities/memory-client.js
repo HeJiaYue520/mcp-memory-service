@@ -211,16 +211,12 @@ class MemoryClient {
 
     /**
      * Query memories using active protocol
-     * @param {string} query - Search query
-     * @param {number} limit - Maximum results to return
-     * @param {object} options - Additional options (qualityBoost, qualityWeight)
      */
-    async queryMemories(query, limit = 10, options = {}) {
+    async queryMemories(query, limit = 10) {
         if (this.activeProtocol === 'mcp' && this.mcpClient) {
-            // MCP doesn't support quality boost yet, fall through to semantic search
             return this.mcpClient.queryMemories(query, limit);
         } else if (this.activeProtocol === 'http') {
-            return this.queryMemoriesHTTP(query, limit, options);
+            return this.queryMemoriesHTTP(query, limit);
         } else {
             throw new Error('No active connection available');
         }
@@ -274,28 +270,10 @@ class MemoryClient {
                             // Extract memory objects from results and preserve similarity_score
                             const memories = response.results
                                 .filter(result => result && result.memory)
-                                .map(result => {
-                                    const memory = { ...result.memory };
-
-                                    // FIX: API returns Unix timestamps in SECONDS, but JavaScript Date expects MILLISECONDS
-                                    // Convert created_at and updated_at from seconds to milliseconds
-                                    if (memory.created_at && typeof memory.created_at === 'number') {
-                                        // Only convert if value looks like seconds (< year 2100 in milliseconds = 4102444800000)
-                                        if (memory.created_at < 4102444800) {
-                                            memory.created_at = memory.created_at * 1000;
-                                        }
-                                    }
-                                    if (memory.updated_at && typeof memory.updated_at === 'number') {
-                                        if (memory.updated_at < 4102444800) {
-                                            memory.updated_at = memory.updated_at * 1000;
-                                        }
-                                    }
-
-                                    return {
-                                        ...memory,
-                                        similarity_score: result.similarity_score
-                                    };
-                                });
+                                .map(result => ({
+                                    ...result.memory,
+                                    similarity_score: result.similarity_score
+                                }));
                             resolve(memories);
                         } else {
                             resolve([]);
@@ -319,27 +297,12 @@ class MemoryClient {
 
     /**
      * Query memories via HTTP REST API
-     * @param {string} query - Search query
-     * @param {number} limit - Maximum results to return
-     * @param {object} options - Additional options
-     * @param {boolean} options.qualityBoost - Enable quality-boosted reranking
-     * @param {number} options.qualityWeight - Weight for quality in reranking (0.0-1.0)
      */
-    async queryMemoriesHTTP(query, limit = 10, options = {}) {
-        const payload = {
+    async queryMemoriesHTTP(query, limit = 10) {
+        return this._performApiPost('/api/search', {
             query: query,
             n_results: limit
-        };
-
-        // Add quality boost parameters if enabled
-        if (options.qualityBoost) {
-            payload.quality_boost = true;
-            if (typeof options.qualityWeight === 'number') {
-                payload.quality_weight = options.qualityWeight;
-            }
-        }
-
-        return this._performApiPost('/api/search', payload);
+        });
     }
 
     /**
@@ -357,67 +320,6 @@ class MemoryClient {
         }
 
         return this._performApiPost('/api/search/by-time', payload);
-    }
-
-    /**
-     * Query memories by tags and time (combined filtering)
-     * @param {Array<string>} tags - Tags to filter by
-     * @param {string} timeQuery - Time-based query (e.g., "last week", "yesterday")
-     * @param {number} limit - Maximum results to return
-     * @param {boolean} semanticQuery - Optional semantic query for relevance filtering
-     */
-    async queryMemoriesByTagsAndTime(tags, timeQuery, limit = 10, semanticQuery = false) {
-        if (this.activeProtocol === 'mcp' && this.mcpClient) {
-            // For MCP, fall back to time-based query (tag filtering not yet supported)
-            return this.mcpClient.queryMemoriesByTime(timeQuery, limit);
-        } else if (this.activeProtocol === 'http') {
-            try {
-                // HTTP API: Query by tag FIRST to get project-specific memories, then filter by time client-side
-                // This is more efficient than time-first when tags are highly selective (e.g., project names)
-                const tagPayload = {
-                    tags: Array.isArray(tags) ? tags : [tags],
-                    limit: limit * 4  // Over-fetch to ensure we have enough after time filtering
-                };
-
-                // Add semantic query if provided
-                if (semanticQuery) {
-                    tagPayload.query = semanticQuery;
-                }
-
-                const tagResults = await this._performApiPost('/api/search/by-tag', tagPayload);
-                const memories = tagResults.results ? tagResults.results.map(r => r.memory) : tagResults;
-
-                // Filter by time window client-side
-                const now = new Date();
-                const filtered = memories.filter(memory => {
-                    const createdAt = new Date(memory.created_at_iso || memory.created_at * 1000);
-                    const daysDiff = (now - createdAt) / (1000 * 60 * 60 * 24);
-
-                    // Parse time query (simplified - supports common patterns)
-                    if (timeQuery.includes('last week') || timeQuery.includes('last-week')) {
-                        return daysDiff <= 7;
-                    } else if (timeQuery.includes('last 2 weeks') || timeQuery.includes('last-2-weeks')) {
-                        return daysDiff <= 14;
-                    } else if (timeQuery.includes('last month') || timeQuery.includes('last-month')) {
-                        return daysDiff <= 30;
-                    } else if (timeQuery.includes('yesterday')) {
-                        return daysDiff <= 1;
-                    } else {
-                        // Default to last month if query not recognized
-                        return daysDiff <= 30;
-                    }
-                });
-
-                console.log(`[Memory Client] Tag-first filter: ${memories.length} tagged → ${filtered.length} within ${timeQuery}`);
-                return filtered.slice(0, limit);
-            } catch (error) {
-                // If tag search fails, fall back to time-only search
-                console.warn('[Memory Client] Tag search failed, falling back to time-only search:', error.message);
-                return this.queryMemoriesByTimeHTTP(timeQuery, limit, semanticQuery);
-            }
-        } else {
-            throw new Error('No active connection available');
-        }
     }
 
     /**

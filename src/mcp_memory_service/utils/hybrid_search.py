@@ -1,0 +1,503 @@
+"""
+Hybrid Search Utilities
+
+Pure functions for combining vector similarity with tag matching
+using Reciprocal Rank Fusion (RRF). Enabled by default with adaptive
+alpha selection based on corpus characteristics.
+
+Research basis:
+- RRF: Standard formula 1/(k+rank) with k=60 for score fusion
+- Adaptive alpha: RecSys crossover experiments show exact match wins at small scale
+- Recency decay: Exponential decay boosts fresher memories
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..config import HybridSearchSettings
+    from ..models.memory import Memory, MemoryQueryResult
+
+# English stop words - common words that don't carry semantic meaning for tag matching
+STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "can",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "you",
+        "he",
+        "she",
+        "it",
+        "we",
+        "they",
+        "my",
+        "your",
+        "his",
+        "her",
+        "its",
+        "our",
+        "their",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "about",
+        "into",
+        "over",
+        "after",
+        "before",
+        "between",
+        "under",
+        "again",
+        "then",
+        "here",
+        "there",
+        "any",
+        "as",
+        "if",
+        "also",
+        "now",
+        "up",
+        "out",
+        "get",
+        "got",
+    }
+)
+
+# Regex for tokenization - split on non-alphanumeric characters
+_TOKEN_PATTERN = re.compile(r"[^a-zA-Z0-9]+")
+
+# Base score for tag-only results that have no vector cosine similarity
+TAG_ONLY_BASE_SCORE = 0.1
+
+
+def extract_query_keywords(query: str, existing_tags: set[str] | None = None) -> list[str]:
+    """
+    Extract potential tag keywords from a search query.
+
+    Algorithm:
+        1. Lowercase and tokenize (split on whitespace/punctuation)
+        2. Remove stop words
+        3. Generate compound candidates by joining adjacent tokens with hyphens
+           (e.g. ["proton", "bridge"] → "proton-bridge") to match hyphenated tags
+        4. If existing_tags provided, filter to only matching tags
+        5. Return unique keywords
+
+    Args:
+        query: User's search query
+        existing_tags: Set of tags that exist in database (for validation)
+
+    Returns:
+        List of normalized keywords that may match tags
+    """
+    # Tokenize: lowercase and split on non-alphanumeric
+    tokens = _TOKEN_PATTERN.split(query.lower())
+
+    # Filter: remove empty strings, stop words, and very short tokens
+    keywords = [token for token in tokens if token and token not in STOP_WORDS and len(token) > 1]
+
+    # Generate hyphenated compounds from adjacent token pairs
+    # "proton bridge" → also try "proton-bridge"
+    compounds = [f"{keywords[i]}-{keywords[i + 1]}" for i in range(len(keywords) - 1)]
+    keywords.extend(compounds)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_keywords: list[str] = []
+    for kw in keywords:
+        if kw not in seen:
+            seen.add(kw)
+            unique_keywords.append(kw)
+
+    # If existing_tags provided, filter to only matching tags
+    if existing_tags is not None:
+        # Normalize existing_tags to lowercase for comparison
+        existing_lower = {tag.lower() for tag in existing_tags}
+        unique_keywords = [kw for kw in unique_keywords if kw in existing_lower]
+
+    return unique_keywords
+
+
+def rrf_score(rank: int, k: int = 60) -> float:
+    """
+    Calculate Reciprocal Rank Fusion score.
+
+    Standard RRF formula: 1 / (k + rank)
+    k=60 is the standard smoothing constant from literature.
+
+    Args:
+        rank: Position in ranked list (1-indexed, so rank 1 = top result)
+        k: Smoothing constant (default 60)
+
+    Returns:
+        RRF score (higher = better)
+    """
+    if rank < 1:
+        return 0.0
+    return 1.0 / (k + rank)
+
+
+def combine_results_rrf(
+    vector_results: list[MemoryQueryResult], tag_matches: list[Memory], alpha: float, k: int = 60
+) -> list[tuple[Memory, float, dict]]:
+    """
+    Combine vector search and tag search results using RRF.
+
+    RRF (alpha * 1/(k+rank)) determines result **ordering**, but the returned
+    score is the original **cosine similarity** from vector search (or a base
+    score of 0.1 for tag-only results). This keeps scores on a meaningful [0,1]
+    scale compatible with min_similarity thresholds.
+
+    Args:
+        vector_results: Ranked results from semantic search (with similarity scores)
+        tag_matches: Memories matching extracted tags (unranked)
+        alpha: Weight for vector results (0.0 to 1.0)
+        k: RRF smoothing constant
+
+    Returns:
+        List of (memory, cosine_score, debug_info) tuples, sorted by RRF rank desc
+    """
+    # Build score maps
+    rrf_scores: dict[str, float] = {}  # content_hash -> RRF score (for ordering)
+    cosine_scores: dict[str, float] = {}  # content_hash -> cosine similarity (for display)
+    memories: dict[str, Memory] = {}  # content_hash -> memory object
+    debug: dict[str, dict] = {}  # content_hash -> debug info
+
+    # Process vector results (ranked by similarity)
+    for rank, result in enumerate(vector_results, start=1):
+        content_hash = result.memory.content_hash
+        vec_rrf = rrf_score(rank, k)
+        vec_contribution = alpha * vec_rrf
+
+        memories[content_hash] = result.memory
+        rrf_scores[content_hash] = vec_contribution
+        cosine_scores[content_hash] = result.similarity_score
+        debug[content_hash] = {
+            "vector_score": result.similarity_score,
+            "vector_rank": rank,
+            "vector_rrf": vec_rrf,
+            "tag_boost": 0.0,
+            "tag_matches": [],
+        }
+
+    # Process tag matches (treat as equally ranked for RRF purposes)
+    # All tag matches get rank=1 contribution (they all matched)
+    tag_rrf = rrf_score(1, k)
+    tag_contribution = (1.0 - alpha) * tag_rrf
+
+    for memory in tag_matches:
+        content_hash = memory.content_hash
+
+        if content_hash in rrf_scores:
+            # Overlap: add tag contribution to RRF score for ordering
+            rrf_scores[content_hash] += tag_contribution
+            debug[content_hash]["tag_boost"] = tag_contribution
+            debug[content_hash]["tag_matches"].append("matched")
+        else:
+            # Tag-only result (not in vector results)
+            memories[content_hash] = memory
+            rrf_scores[content_hash] = tag_contribution
+            cosine_scores[content_hash] = TAG_ONLY_BASE_SCORE
+            debug[content_hash] = {
+                "vector_score": 0.0,
+                "vector_rank": 0,
+                "vector_rrf": 0.0,
+                "tag_boost": tag_contribution,
+                "tag_matches": ["matched"],
+            }
+
+    # Build final results: sort by RRF score, but return cosine similarity as the score
+    results: list[tuple[Memory, float, dict]] = []
+    for content_hash in rrf_scores:
+        info = debug[content_hash]
+        display_score = cosine_scores[content_hash]
+        info["final_score"] = display_score
+        info["rrf_score"] = rrf_scores[content_hash]
+        info["alpha_used"] = alpha
+        results.append((memories[content_hash], display_score, info))
+
+    # Sort by RRF score descending (preserves RRF ranking)
+    results.sort(key=lambda x: x[2]["rrf_score"], reverse=True)
+
+    return results
+
+
+def combine_results_rrf_multi(
+    result_sets: list[list[MemoryQueryResult]],
+    weights: list[float],
+    tag_matches: list[Memory],
+    k: int = 60,
+) -> list[tuple[Memory, float, dict]]:
+    """
+    Combine N result sets using weighted RRF, then fold in tag matches.
+
+    Generalises combine_results_rrf to accept an arbitrary number of ranked
+    lists with per-list weights.  The **display score** returned is the max
+    cosine similarity observed across all sets (not the RRF score).
+
+    Args:
+        result_sets: N ranked lists of MemoryQueryResult
+        weights: Per-list RRF weight (len must equal len(result_sets))
+        tag_matches: Memories matching extracted tags
+        k: RRF smoothing constant
+
+    Returns:
+        List of (memory, max_cosine_score, debug_info) sorted by RRF rank desc
+    """
+    rrf_scores: dict[str, float] = {}
+    cosine_scores: dict[str, float] = {}
+    memories: dict[str, Memory] = {}
+    debug: dict[str, dict] = {}
+
+    if len(result_sets) != len(weights):
+        raise ValueError(f"result_sets ({len(result_sets)}) and weights ({len(weights)}) must have same length")
+
+    total_weight = sum(weights)
+    if total_weight == 0:
+        raise ValueError("weights must not all be zero")
+
+    for set_idx, (results, weight) in enumerate(zip(result_sets, weights)):
+        for rank, result in enumerate(results, start=1):
+            ch = result.memory.content_hash
+            contribution = weight * rrf_score(rank, k)
+
+            memories.setdefault(ch, result.memory)
+            rrf_scores[ch] = rrf_scores.get(ch, 0.0) + contribution
+            cosine_scores[ch] = max(cosine_scores.get(ch, 0.0), result.similarity_score)
+
+            if ch not in debug:
+                debug[ch] = {"set_contributions": [], "tag_boost": 0.0, "tag_matches": []}
+            debug[ch]["set_contributions"].append({"set": set_idx, "rank": rank, "weight": weight, "contribution": contribution})
+
+    # Tag matches: flat RRF contribution at half the total weight
+    tag_rrf = rrf_score(1, k)
+    tag_contribution = 0.5 * tag_rrf if tag_matches else 0.0
+
+    for memory in tag_matches:
+        ch = memory.content_hash
+        if ch in rrf_scores:
+            rrf_scores[ch] += tag_contribution
+            debug[ch]["tag_boost"] = tag_contribution
+            debug[ch]["tag_matches"].append("matched")
+        else:
+            memories[ch] = memory
+            rrf_scores[ch] = tag_contribution
+            cosine_scores[ch] = TAG_ONLY_BASE_SCORE
+            debug[ch] = {
+                "set_contributions": [],
+                "tag_boost": tag_contribution,
+                "tag_matches": ["matched"],
+            }
+
+    results_out: list[tuple[Memory, float, dict]] = []
+    for ch in rrf_scores:
+        info = debug[ch]
+        display_score = cosine_scores[ch]
+        info["final_score"] = display_score
+        info["rrf_score"] = rrf_scores[ch]
+        results_out.append((memories[ch], display_score, info))
+
+    results_out.sort(key=lambda x: x[2]["rrf_score"], reverse=True)
+    return results_out
+
+
+def get_adaptive_alpha(
+    corpus_size: int,
+    matching_tag_count: int,
+    config: HybridSearchSettings,
+) -> float:
+    """
+    Calculate adaptive alpha based on corpus size and query characteristics.
+
+    Research basis: RecSys crossover experiments show algorithm effectiveness
+    varies by scale - exact match outperforms ML at small scale.
+
+    Logic:
+        - corpus < threshold_small (500): alpha = 0.5 (balanced)
+        - threshold_small <= corpus < threshold_large (5000): alpha = 0.7 (semantic-biased)
+        - corpus >= threshold_large: alpha = 0.8 (strong semantic)
+        - If matching_tag_count >= 3: boost tag weight by 1.5x
+
+    Args:
+        corpus_size: Total memories in database
+        matching_tag_count: How many query terms match existing tags
+        config: Hybrid search settings with thresholds
+
+    Returns:
+        Alpha value (0.0 to 1.0)
+    """
+    # If explicit alpha is configured, use it
+    if config.hybrid_alpha is not None:
+        return config.hybrid_alpha
+
+    # Determine base alpha from corpus size
+    if corpus_size < config.adaptive_threshold_small:
+        base_alpha = 0.5  # Small corpus: balanced hybrid
+    elif corpus_size < config.adaptive_threshold_large:
+        base_alpha = 0.7  # Medium corpus: semantic-biased
+    else:
+        base_alpha = 0.8  # Large corpus: strong semantic
+
+    # Apply tag match boost: if >= 3 tags match, increase tag weight by 1.5x
+    # This means reducing alpha to give tags more influence
+    if matching_tag_count >= 3:
+        # Boost tag weight by 1.5x means multiplying (1-alpha) by 1.5
+        # So new_alpha = 1 - 1.5*(1-base_alpha)
+        # Example: base_alpha=0.7 -> tag_weight=0.3 -> boosted=0.45 -> new_alpha=0.55
+        boosted_tag_weight = 1.5 * (1.0 - base_alpha)
+        alpha = max(0.0, 1.0 - boosted_tag_weight)
+    else:
+        alpha = base_alpha
+
+    return alpha
+
+
+def temporal_decay_factor(days_old: float, lambda_: float, base: float = 0.0) -> float:
+    """
+    Compute temporal decay factor for a memory's age.
+
+    Formula: base + exp(-lambda * days) * (1 - base)
+    - When base=0: pure exponential decay (backward compat)
+    - When base=0.7: 70% minimum relevance floor
+
+    Args:
+        days_old: Days since memory was last updated (clamped to >= 0)
+        lambda_: Decay rate (0 = disabled, returns 1.0)
+        base: Minimum relevance floor (0.0-1.0)
+
+    Returns:
+        Decay factor between base and 1.0
+    """
+    if lambda_ <= 0:
+        return 1.0
+    days_old = max(0.0, days_old)
+    decay = math.exp(-lambda_ * days_old)
+    return base + decay * (1 - base)
+
+
+def apply_recency_decay(
+    results: list[tuple[Memory, float, dict]],
+    decay_rate: float,
+    base: float = 0.0,
+) -> list[tuple[Memory, float, dict]]:
+    """
+    Apply recency decay to search results.
+
+    Formula: final_score = score * (base + exp(-decay * days) * (1 - base))
+
+    With decay=0.01 and base=0, half-life is ~70 days.
+    With base=0.7, old memories retain at least 70% relevance.
+
+    Args:
+        results: List of (memory, score, debug_info) tuples
+        decay_rate: Decay rate (0 = disabled)
+        base: Minimum relevance floor (0.0 = pure exp decay, 0.7 = 70% floor)
+
+    Returns:
+        Results with recency-adjusted scores, re-sorted
+    """
+    if decay_rate <= 0:
+        # Decay disabled - add recency_factor=1.0 to debug and return as-is
+        for _memory, _score, info in results:
+            info["recency_factor"] = 1.0
+        return results
+
+    now = datetime.now(UTC)
+    adjusted: list[tuple[Memory, float, dict]] = []
+
+    for memory, score, info in results:
+        # Calculate days since last update
+        try:
+            updated_at = datetime.fromisoformat(memory.updated_at_iso)
+            # Normalize to UTC - handle both aware and naive datetimes
+            if updated_at.tzinfo is None:
+                # Assume naive datetime is UTC
+                updated_at = updated_at.replace(tzinfo=UTC)
+            days_old = (now - updated_at).total_seconds() / 86400
+        except (ValueError, TypeError):
+            # If we can't parse the date, assume it's old
+            days_old = 365
+
+        # Apply temporal decay with optional base floor
+        recency_factor = temporal_decay_factor(days_old, decay_rate, base)
+        adjusted_score = score * recency_factor
+
+        # Update debug info
+        info["recency_factor"] = recency_factor
+        info["days_old"] = days_old
+        info["final_score"] = adjusted_score
+        if base > 0:
+            info["temporal_decay_base"] = base
+
+        adjusted.append((memory, adjusted_score, info))
+
+    # Re-sort by adjusted score
+    adjusted.sort(key=lambda x: x[1], reverse=True)
+
+    return adjusted

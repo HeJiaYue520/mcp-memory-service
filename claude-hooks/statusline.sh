@@ -2,7 +2,7 @@
 
 # Claude Code Status Line Script
 # Displays session memory context in status line
-# Format: 🧠 8 (5 recent) memories | 📊 12 commits
+# Format: 🧠 8 (5 recent) | 📊 12 commits
 
 # Path to session cache file
 CACHE_FILE="$HOME/.claude/hooks/utilities/session-cache.json"
@@ -37,9 +37,9 @@ STATUS=""
 # Memory section
 if [ "$MEMORIES" -gt 0 ]; then
     if [ "$RECENT" -gt 0 ]; then
-        STATUS="${CYAN}🧠 ${MEMORIES}${RESET} ${GREEN}(${RECENT} recent)${RESET} memories"
+        STATUS="${CYAN}🧠 ${MEMORIES}${RESET} ${GREEN}(${RECENT} recent)${RESET}"
     else
-        STATUS="${CYAN}🧠 ${MEMORIES}${RESET} memories"
+        STATUS="${CYAN}🧠 ${MEMORIES}${RESET}"
     fi
 fi
 

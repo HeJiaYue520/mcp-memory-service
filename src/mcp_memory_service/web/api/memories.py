@@ -16,25 +16,27 @@
 Memory CRUD endpoints for the HTTP interface.
 """
 
+import asyncio
 import logging
 import socket
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
-from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ...storage.base import MemoryStorage
+from ...config import INCLUDE_HOSTNAME, OAUTH_ENABLED
 from ...models.memory import Memory
 from ...services.memory_service import MemoryService
-from ...utils.hashing import generate_content_hash
-from ...config import INCLUDE_HOSTNAME, OAUTH_ENABLED
-from ..dependencies import get_storage, get_memory_service
-from ..sse import sse_manager, create_memory_stored_event, create_memory_deleted_event
+from ...storage.base import MemoryStorage
+from ..dependencies import get_memory_service, get_storage
+
+# Concurrency control for write operations — limits parallel writes to prevent
+# storage contention without the complexity of a serialized queue/future system.
+_write_semaphore = asyncio.Semaphore(20)
 
 # OAuth authentication imports (conditional)
 if OAUTH_ENABLED or TYPE_CHECKING:
-    from ..oauth.middleware import require_read_access, require_write_access, AuthenticationResult
+    from ..oauth.middleware import AuthenticationResult, require_read_access, require_write_access
 else:
     # Provide type stubs when OAuth is disabled
     AuthenticationResult = None
@@ -48,36 +50,40 @@ logger = logging.getLogger(__name__)
 # Request/Response Models
 class MemoryCreateRequest(BaseModel):
     """Request model for creating a new memory."""
+
     content: str = Field(..., description="The memory content to store")
-    tags: List[str] = Field(default=[], description="Tags to categorize the memory")
-    memory_type: Optional[str] = Field(None, description="Type of memory (e.g., 'note', 'reminder', 'fact')")
-    metadata: Dict[str, Any] = Field(default={}, description="Additional metadata for the memory")
-    client_hostname: Optional[str] = Field(None, description="Client machine hostname for source tracking")
+    tags: list[str] = Field(default=[], description="Tags to categorize the memory")
+    memory_type: str | None = Field(None, description="Type of memory (e.g., 'note', 'reminder', 'fact')")
+    metadata: dict[str, Any] = Field(default={}, description="Additional metadata for the memory")
+    client_hostname: str | None = Field(None, description="Client machine hostname for source tracking")
 
 
 class MemoryUpdateRequest(BaseModel):
     """Request model for updating memory metadata (tags, type, metadata only)."""
-    tags: Optional[List[str]] = Field(None, description="Updated tags to categorize the memory")
-    memory_type: Optional[str] = Field(None, description="Updated memory type (e.g., 'note', 'reminder', 'fact')")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Updated metadata for the memory")
+
+    tags: list[str] | None = Field(None, description="Updated tags to categorize the memory")
+    memory_type: str | None = Field(None, description="Updated memory type (e.g., 'note', 'reminder', 'fact')")
+    metadata: dict[str, Any] | None = Field(None, description="Updated metadata for the memory")
 
 
 class MemoryResponse(BaseModel):
     """Response model for memory data."""
+
     content: str
     content_hash: str
-    tags: List[str]
-    memory_type: Optional[str]
-    metadata: Dict[str, Any]
-    created_at: Optional[float]
-    created_at_iso: Optional[str]
-    updated_at: Optional[float]  
-    updated_at_iso: Optional[str]
+    tags: list[str]
+    memory_type: str | None
+    metadata: dict[str, Any]
+    created_at: float | None
+    created_at_iso: str | None
+    updated_at: float | None
+    updated_at_iso: str | None
 
 
 class MemoryListResponse(BaseModel):
     """Response model for paginated memory list."""
-    memories: List[MemoryResponse]
+
+    memories: list[MemoryResponse]
     total: int
     page: int
     page_size: int
@@ -86,14 +92,16 @@ class MemoryListResponse(BaseModel):
 
 class MemoryCreateResponse(BaseModel):
     """Response model for memory creation."""
+
     success: bool
     message: str
-    content_hash: Optional[str] = None
-    memory: Optional[MemoryResponse] = None
+    content_hash: str | None = None
+    memory: MemoryResponse | None = None
 
 
 class MemoryDeleteResponse(BaseModel):
     """Response model for memory deletion."""
+
     success: bool
     message: str
     content_hash: str
@@ -101,21 +109,112 @@ class MemoryDeleteResponse(BaseModel):
 
 class MemoryUpdateResponse(BaseModel):
     """Response model for memory update."""
+
     success: bool
     message: str
     content_hash: str
-    memory: Optional[MemoryResponse] = None
+    memory: MemoryResponse | None = None
 
 
 class TagResponse(BaseModel):
     """Response model for a single tag with its count."""
+
     tag: str
     count: int
 
 
 class TagListResponse(BaseModel):
     """Response model for tags list."""
-    tags: List[TagResponse]
+
+    tags: list[TagResponse]
+
+
+# ---------------------------------------------------------------------------
+# Batch Request/Response Models
+# ---------------------------------------------------------------------------
+
+BATCH_MAX = 100
+
+
+class BatchItemResult(BaseModel):
+    """Per-item result within a batch operation."""
+
+    index: int
+    success: bool
+    content_hash: str | None = None
+    error: str | None = None
+
+
+class BatchMemoryCreateRequest(BaseModel):
+    """Request model for batch memory creation (max 100 items)."""
+
+    memories: list[MemoryCreateRequest] = Field(..., max_length=BATCH_MAX)
+
+
+class BatchMemoryCreateResponse(BaseModel):
+    """Response model for batch memory creation."""
+
+    success: bool
+    created: int
+    failed: int
+    results: list[BatchItemResult]
+    rolled_back: bool = False
+
+
+class BatchMemoryDeleteRequest(BaseModel):
+    """Request model for batch memory deletion (max 100 items)."""
+
+    content_hashes: list[str] = Field(..., max_length=BATCH_MAX)
+
+
+class BatchMemoryDeleteResponse(BaseModel):
+    """Response model for batch memory deletion."""
+
+    success: bool
+    deleted: int
+    failed: int
+    results: list[BatchItemResult]
+
+
+class BatchMemoryUpdateItem(BaseModel):
+    """Single item within a batch update request."""
+
+    content_hash: str
+    tags: list[str] | None = None
+    memory_type: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class BatchMemoryUpdateRequest(BaseModel):
+    """Request model for batch memory metadata update (max 100 items)."""
+
+    memories: list[BatchMemoryUpdateItem] = Field(..., max_length=BATCH_MAX)
+
+
+class BatchMemoryUpdateResponse(BaseModel):
+    """Response model for batch memory update."""
+
+    success: bool
+    updated: int
+    failed: int
+    results: list[BatchItemResult]
+
+
+class BatchTagOperationRequest(BaseModel):
+    """Request model for batch tag add/remove across multiple memories."""
+
+    content_hashes: list[str] = Field(..., max_length=BATCH_MAX)
+    add_tags: list[str] | None = None
+    remove_tags: list[str] | None = None
+
+
+class BatchTagOperationResponse(BaseModel):
+    """Response model for batch tag operation."""
+
+    success: bool
+    updated: int
+    failed: int
+    results: list[BatchItemResult]
 
 
 def memory_to_response(memory: Memory) -> MemoryResponse:
@@ -129,7 +228,7 @@ def memory_to_response(memory: Memory) -> MemoryResponse:
         created_at=memory.created_at,
         created_at_iso=memory.created_at_iso,
         updated_at=memory.updated_at,
-        updated_at_iso=memory.updated_at_iso
+        updated_at_iso=memory.updated_at_iso,
     )
 
 
@@ -138,13 +237,13 @@ async def store_memory(
     request: MemoryCreateRequest,
     http_request: Request,
     memory_service: MemoryService = Depends(get_memory_service),
-    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
 ):
     """
     Store a new memory.
 
     Uses the MemoryService for consistent business logic including content processing,
-    hostname tagging, and metadata enrichment.
+    hostname tagging, and metadata enrichment. Write concurrency is bounded by semaphore.
     """
     try:
         # Resolve hostname for consistent tagging (logic stays in API layer, tagging in service)
@@ -155,48 +254,22 @@ async def store_memory(
             if request.client_hostname:
                 client_hostname = request.client_hostname
             # 2. Check for X-Client-Hostname header
-            elif http_request.headers.get('X-Client-Hostname'):
-                client_hostname = http_request.headers.get('X-Client-Hostname')
+            elif http_request.headers.get("X-Client-Hostname"):
+                client_hostname = http_request.headers.get("X-Client-Hostname")
             # 3. Fallback to server hostname (original behavior)
             else:
                 client_hostname = socket.gethostname()
 
-        # Use injected MemoryService for consistent business logic (hostname tagging handled internally)
-        result = await memory_service.store_memory(
-            content=request.content,
-        tags=request.tags,
-        memory_type=request.memory_type,
-        metadata=request.metadata,
-        client_hostname=client_hostname
-        )
+        async with _write_semaphore:
+            result = await memory_service.store_memory(
+                content=request.content,
+                tags=request.tags,
+                memory_type=request.memory_type,
+                metadata=request.metadata,
+                client_hostname=client_hostname,
+            )
 
         if result["success"]:
-            # Broadcast SSE event for successful memory storage
-            try:
-                # Handle both single memory and chunked responses
-                if "memory" in result:
-                    memory_data = {
-                        "content_hash": result["memory"]["content_hash"],
-                        "content": result["memory"]["content"],
-                        "tags": result["memory"]["tags"],
-                        "memory_type": result["memory"]["memory_type"]
-                    }
-                else:
-                    # For chunked responses, use the first chunk's data
-                    first_memory = result["memories"][0]
-                    memory_data = {
-                        "content_hash": first_memory["content_hash"],
-                        "content": first_memory["content"],
-                        "tags": first_memory["tags"],
-                        "memory_type": first_memory["memory_type"]
-                    }
-
-                event = create_memory_stored_event(memory_data)
-                await sse_manager.broadcast_event(event)
-            except Exception as e:
-                # Don't fail the request if SSE broadcasting fails
-                logger.warning(f"Failed to broadcast memory_stored event: {e}")
-
             # Return appropriate response based on MemoryService result
             if "memory" in result:
                 # Single memory response
@@ -204,7 +277,7 @@ async def store_memory(
                     success=True,
                     message="Memory stored successfully",
                     content_hash=result["memory"]["content_hash"],
-                    memory=result["memory"]
+                    memory=result["memory"],
                 )
             else:
                 # Chunked memory response
@@ -213,28 +286,24 @@ async def store_memory(
                     success=True,
                     message=f"Memory stored as {result['total_chunks']} chunks",
                     content_hash=first_memory["content_hash"],
-                    memory=first_memory
+                    memory=first_memory,
                 )
         else:
-            return MemoryCreateResponse(
-                success=False,
-                message=result.get("error", "Failed to store memory"),
-                content_hash=None
-            )
-            
+            return MemoryCreateResponse(success=False, message=result.get("error", "Failed to store memory"), content_hash=None)
+
     except Exception as e:
         logger.error(f"Failed to store memory: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to store memory. Please try again.")
+        raise HTTPException(status_code=500, detail="Failed to store memory. Please try again.") from e
 
 
 @router.get("/memories", response_model=MemoryListResponse, tags=["memories"])
 async def list_memories(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Number of memories per page"),
-    tag: Optional[str] = Query(None, description="Filter by tag"),
-    memory_type: Optional[str] = Query(None, description="Filter by memory type"),
+    tag: str | None = Query(None, description="Filter by tag"),
+    memory_type: str | None = Query(None, description="Filter by memory type"),
     memory_service: MemoryService = Depends(get_memory_service),
-    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None,
 ):
     """
     List memories with pagination and optional filtering.
@@ -243,82 +312,65 @@ async def list_memories(
     """
     try:
         # Use the injected service for consistent, performant memory listing
-        result = await memory_service.list_memories(
-            page=page,
-            page_size=page_size,
-            tag=tag,
-            memory_type=memory_type
-        )
+        result = await memory_service.list_memories(page=page, page_size=page_size, tag=tag, memory_type=memory_type)
 
         return MemoryListResponse(
             memories=result["memories"],
             total=result["total"],
             page=result["page"],
             page_size=result["page_size"],
-            has_more=result["has_more"]
+            has_more=result["has_more"],
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list memories: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list memories: {str(e)}") from e
 
 
 @router.get("/memories/{content_hash}", response_model=MemoryResponse, tags=["memories"])
 async def get_memory(
     content_hash: str,
     storage: MemoryStorage = Depends(get_storage),
-    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None,
 ):
     """
     Get a specific memory by its content hash.
-    
+
     Retrieves a single memory entry using its unique content hash identifier.
     """
     try:
         # Use the new get_by_hash method for direct hash lookup
         memory = await storage.get_by_hash(content_hash)
-        
+
         if not memory:
             raise HTTPException(status_code=404, detail="Memory not found")
-        
+
         return memory_to_response(memory)
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get memory: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get memory: {str(e)}") from e
 
 
 @router.delete("/memories/{content_hash}", response_model=MemoryDeleteResponse, tags=["memories"])
 async def delete_memory(
     content_hash: str,
     storage: MemoryStorage = Depends(get_storage),
-    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
 ):
     """
     Delete a memory by its content hash.
-    
+
     Permanently removes a memory entry from the storage.
     """
     try:
         success, message = await storage.delete(content_hash)
-        
-        # Broadcast SSE event for memory deletion
-        try:
-            event = create_memory_deleted_event(content_hash, success)
-            await sse_manager.broadcast_event(event)
-        except Exception as e:
-            # Don't fail the request if SSE broadcasting fails
-            logger.warning(f"Failed to broadcast memory_deleted event: {e}")
-        
-        return MemoryDeleteResponse(
-            success=success,
-            message=message,
-            content_hash=content_hash
-        )
+
+        return MemoryDeleteResponse(success=success, message=message, content_hash=content_hash)
 
     except Exception as e:
         logger.error(f"Failed to delete memory: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to delete memory. Please try again.")
+        raise HTTPException(status_code=500, detail="Failed to delete memory. Please try again.") from e
 
 
 @router.put("/memories/{content_hash}", response_model=MemoryUpdateResponse, tags=["memories"])
@@ -326,7 +378,7 @@ async def update_memory(
     content_hash: str,
     request: MemoryUpdateRequest,
     storage: MemoryStorage = Depends(get_storage),
-    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
 ):
     """
     Update memory metadata (tags, type, metadata) without changing content or timestamps.
@@ -343,11 +395,11 @@ async def update_memory(
         # Build the updates dictionary with only provided fields
         updates = {}
         if request.tags is not None:
-            updates['tags'] = request.tags
+            updates["tags"] = request.tags
         if request.memory_type is not None:
-            updates['memory_type'] = request.memory_type
+            updates["memory_type"] = request.memory_type
         if request.metadata is not None:
-            updates['metadata'] = request.metadata
+            updates["metadata"] = request.metadata
 
         # If no updates provided, return current memory
         if not updates:
@@ -355,14 +407,12 @@ async def update_memory(
                 success=True,
                 message="No updates provided - memory unchanged",
                 content_hash=content_hash,
-                memory=memory_to_response(existing_memory)
+                memory=memory_to_response(existing_memory),
             )
 
         # Perform the update
         success, message = await storage.update_memory_metadata(
-            content_hash=content_hash,
-            updates=updates,
-            preserve_timestamps=True
+            content_hash=content_hash, updates=updates, preserve_timestamps=True
         )
 
         if success:
@@ -373,25 +423,176 @@ async def update_memory(
                 success=True,
                 message=message,
                 content_hash=content_hash,
-                memory=memory_to_response(updated_memory) if updated_memory else None
+                memory=memory_to_response(updated_memory) if updated_memory else None,
             )
         else:
-            return MemoryUpdateResponse(
-                success=False,
-                message=message,
-                content_hash=content_hash
-            )
+            return MemoryUpdateResponse(success=False, message=message, content_hash=content_hash)
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update memory: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update memory: {str(e)}") from e
+
+
+@router.post("/memories/batch", response_model=BatchMemoryCreateResponse, tags=["memories"])
+async def batch_store_memories(
+    request: BatchMemoryCreateRequest,
+    http_request: Request,
+    memory_service: MemoryService = Depends(get_memory_service),
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
+):
+    """
+    Store multiple memories transactionally (max 100).
+
+    All memories are stored or none are (rollback on partial failure).
+    Writes are bounded by _write_semaphore to limit concurrent store operations.
+    """
+    try:
+        # Resolve hostname once for the batch
+        client_hostname = None
+        if INCLUDE_HOSTNAME:
+            if http_request.headers.get("X-Client-Hostname"):
+                client_hostname = http_request.headers.get("X-Client-Hostname")
+            else:
+                client_hostname = socket.gethostname()
+
+        # Build memory dicts, applying per-item hostname override or batch hostname
+        memories_input = []
+        for mem in request.memories:
+            memories_input.append(
+                {
+                    "content": mem.content,
+                    "tags": mem.tags,
+                    "memory_type": mem.memory_type,
+                    "metadata": mem.metadata,
+                    "client_hostname": mem.client_hostname or client_hostname,
+                }
+            )
+
+        async with _write_semaphore:
+            result = await memory_service.batch_store_memory(memories=memories_input)
+
+        return BatchMemoryCreateResponse(
+            success=result["success"],
+            created=result["created"],
+            failed=result["failed"],
+            results=[BatchItemResult(**r) for r in result["results"]],
+            rolled_back=result.get("rolled_back", False),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to batch store memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to batch store memories. Please try again.") from e
+
+
+@router.delete("/memories/batch", response_model=BatchMemoryDeleteResponse, tags=["memories"])
+async def batch_delete_memories(
+    request: BatchMemoryDeleteRequest,
+    memory_service: MemoryService = Depends(get_memory_service),
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
+):
+    """
+    Delete multiple memories by content hash (max 100).
+
+    Best-effort: continues on individual failures and reports per-item status.
+    """
+    try:
+        result = await memory_service.batch_delete_memory(request.content_hashes)
+
+        return BatchMemoryDeleteResponse(
+            success=result["success"],
+            deleted=result["deleted"],
+            failed=result["failed"],
+            results=[BatchItemResult(**r) for r in result["results"]],
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to batch delete memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to batch delete memories. Please try again.") from e
+
+
+@router.put("/memories/batch", response_model=BatchMemoryUpdateResponse, tags=["memories"])
+async def batch_update_memories(
+    request: BatchMemoryUpdateRequest,
+    memory_service: MemoryService = Depends(get_memory_service),
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
+):
+    """
+    Update metadata (tags, memory_type, metadata) for multiple memories (max 100).
+
+    Best-effort: continues on individual failures and reports per-item status.
+    """
+    try:
+        updates_input = [
+            {
+                "content_hash": item.content_hash,
+                "tags": item.tags,
+                "memory_type": item.memory_type,
+                "metadata": item.metadata,
+            }
+            for item in request.memories
+        ]
+
+        async with _write_semaphore:
+            result = await memory_service.batch_update_memory(updates=updates_input)
+
+        return BatchMemoryUpdateResponse(
+            success=result["success"],
+            updated=result["updated"],
+            failed=result["failed"],
+            results=[BatchItemResult(**r) for r in result["results"]],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to batch update memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to batch update memories. Please try again.") from e
+
+
+@router.post("/memories/batch/tags", response_model=BatchTagOperationResponse, tags=["memories"])
+async def batch_tag_memories(
+    request: BatchTagOperationRequest,
+    memory_service: MemoryService = Depends(get_memory_service),
+    user: AuthenticationResult = Depends(require_write_access) if OAUTH_ENABLED else None,
+):
+    """
+    Add and/or remove tags from multiple memories (max 100).
+
+    Best-effort: continues on individual failures and reports per-item status.
+    Requires at least one of add_tags or remove_tags.
+    """
+    if not request.add_tags and not request.remove_tags:
+        raise HTTPException(status_code=422, detail="At least one of add_tags or remove_tags must be provided")
+
+    try:
+        async with _write_semaphore:
+            result = await memory_service.batch_tag_operation(
+                content_hashes=request.content_hashes,
+                add_tags=request.add_tags,
+                remove_tags=request.remove_tags,
+            )
+
+        return BatchTagOperationResponse(
+            success=result["success"],
+            updated=result["updated"],
+            failed=result["failed"],
+            results=[BatchItemResult(**r) for r in result["results"]],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to batch tag memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to batch tag memories. Please try again.") from e
 
 
 @router.get("/tags", response_model=TagListResponse, tags=["tags"])
 async def get_tags(
     storage: MemoryStorage = Depends(get_storage),
-    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None
+    user: AuthenticationResult = Depends(require_read_access) if OAUTH_ENABLED else None,
 ):
     """
     Get all tags with their usage counts.
@@ -410,6 +611,6 @@ async def get_tags(
 
     except AttributeError as e:
         # Handle case where storage backend doesn't implement get_all_tags_with_counts
-        raise HTTPException(status_code=501, detail=f"Tags endpoint not supported by current storage backend: {str(e)}")
+        raise HTTPException(status_code=501, detail=f"Tags endpoint not supported by current storage backend: {str(e)}") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get tags: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get tags: {str(e)}") from e

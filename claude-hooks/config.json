@@ -1,17 +1,10 @@
 {
-  "codeExecution": {
-    "enabled": true,
-    "timeout": 15000,
-    "fallbackToMCP": true,
-    "enableMetrics": true,
-    "pythonPath": "python3"
-  },
   "memoryService": {
     "protocol": "auto",
     "preferredProtocol": "http",
     "fallbackEnabled": true,
     "http": {
-      "endpoint": "http://127.0.0.1:8000",
+      "endpoint": "http://localhost:8889",
       "apiKey": "VhOGAoUOE5_BMzu-phDORdyXHNMcDRBxvndK_Uop",
       "healthCheckTimeout": 3000,
       "useDetailedHealthCheck": true
@@ -25,7 +18,7 @@
         "-s",
         "hybrid"
       ],
-      "serverWorkingDir": "/home/hkr/repositories/mcp-memory-service",
+      "serverWorkingDir": "/Users/hkr/Documents/GitHub/mcp-memory-service",
       "connectionTimeout": 2000,
       "toolCallTimeout": 3000
     },
@@ -41,7 +34,8 @@
     "recentTimeWindow": "last week",
     "fallbackTimeWindow": "last 2 weeks",
     "showStorageSource": true,
-    "sourceDisplayMode": "brief"
+    "sourceDisplayMode": "brief",
+    "sortByCreationDate": true
   },
   "projectDetection": {
     "gitRepository": true,
@@ -88,21 +82,10 @@
     "minSessionLength": 100,
     "minConfidence": 0.1
   },
-  "autoCapture": {
-    "enabled": true,
-    "minLength": 300,
-    "maxLength": 4000,
-    "patterns": ["decision", "error", "learning", "implementation", "important", "code"],
-    "debugMode": false,
-    "userOverrides": {
-      "forceRemember": "#remember",
-      "forceSkip": "#skip"
-    }
-  },
   "hooks": {
     "sessionStart": {
       "enabled": true,
-      "timeout": 20000,
+      "timeout": 10000,
       "priority": "high"
     },
     "midConversation": {
@@ -136,21 +119,7 @@
     "showRecencyInfo": true,
     "showPhaseDetails": true,
     "showGitAnalysis": true,
-    "cleanMode": false,
-    "style": "balanced",
-    "showScoringBreakdown": false,
-    "adaptiveTruncation": true,
-    "prioritySections": [
-      "recent-work",
-      "current-problems",
-      "key-decisions",
-      "additional-context"
-    ]
-  },
-  "contentLength": {
-    "manyMemories": 300,
-    "fewMemories": 500,
-    "veryFewMemories": 800
+    "cleanMode": false
   },
   "naturalTriggers": {
     "enabled": true,

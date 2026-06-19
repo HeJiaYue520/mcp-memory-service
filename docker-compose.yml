@@ -1,0 +1,119 @@
+services:
+  # Qdrant vector database
+  qdrant:
+    image: docker.io/qdrant/qdrant:latest
+    container_name: mcp-memory-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      # Qdrant image has no curl/wget/nc — use bash /dev/tcp for HTTP readiness
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && echo -e \"GET /readyz HTTP/1.0\\r\\n\" >&3 && grep -q \"ready\" <&3'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 512M
+    networks:
+      - mcp-memory
+
+  # FalkorDB graph database (Redis protocol)
+  falkordb:
+    image: docker.io/falkordb/falkordb:latest
+    container_name: mcp-memory-falkordb
+    volumes:
+      - falkordb-data:/data
+    command: ["--appendonly", "yes", "--appendfsync", "everysec"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    networks:
+      - mcp-memory
+
+  # Unified MCP Memory Service (HTTP + MCP)
+  mcp-memory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-memory-unified
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    ports:
+      - "8000:8000"  # HTTP API + dashboard
+      - "8001:8001"  # MCP streamable-http
+    environment:
+      # Storage
+      - MCP_MEMORY_STORAGE_BACKEND=qdrant
+      - MCP_MEMORY_EMBEDDING_MODEL=intfloat/e5-small-v2
+      - MCP_QDRANT_URL=http://qdrant:6333
+
+      # FalkorDB graph layer
+      - MCP_FALKORDB_ENABLED=true
+      - MCP_FALKORDB_HOST=falkordb
+      - MCP_FALKORDB_PORT=6379
+      - MCP_FALKORDB_PASSWORD=
+
+      # CacheKit L2 (reuse FalkorDB on db 1)
+      - REDIS_URL=redis://falkordb:6379/1
+
+      # HTTP server
+      - MCP_HTTP_ENABLED=true
+      - MCP_HTTP_PORT=8000
+      - MCP_HTTP_HOST=0.0.0.0
+
+      # MCP server (streamable-http transport)
+      - MCP_TRANSPORT_MODE=streamable-http
+      - MCP_SERVER_PORT=8001
+      - MCP_SERVER_HOST=0.0.0.0
+
+      # Logging
+      - MCP_LOG_LEVEL=INFO
+    volumes:
+      - mcp-memory-backups:/root/.local/share/mcp-memory/backups
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G
+    networks:
+      - mcp-memory
+
+volumes:
+  qdrant-data:
+    driver: local
+  falkordb-data:
+    driver: local
+  mcp-memory-backups:
+    driver: local
+
+networks:
+  mcp-memory:
+    driver: bridge

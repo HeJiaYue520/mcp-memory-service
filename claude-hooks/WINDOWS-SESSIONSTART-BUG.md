@@ -1,28 +1,16 @@
 # Windows SessionStart Hook Bug - Complete Analysis
 
-## ✅ RESOLVED (December 2024)
+## Executive Summary
 
-> **This bug has been fixed in Claude Code 2.0.76+**
->
-> SessionStart hooks now work correctly on Windows. The subprocess lifecycle management
-> bug was fixed in Claude Code core. No workaround is needed for users running
-> Claude Code 2.0.76 or later.
->
-> **Verified**: 2025-12-30 - SessionStart hook executed successfully on Windows 11
+**Issue**: SessionStart hooks cause Claude Code to become completely unresponsive on Windows, requiring terminal closure to recover.
 
----
+**Root Cause**: Windows-specific subprocess lifecycle management bug in Claude Code's initialization phase. The parent process doesn't properly detect subprocess completion during synchronous initialization.
 
-## Historical Context (Pre-Fix)
+**Status**: **UNFIXABLE** at hook level - requires Claude Code core fix
 
-**Issue**: SessionStart hooks caused Claude Code to become completely unresponsive on Windows, requiring terminal closure to recover.
+**GitHub Issue**: [#160](https://github.com/doobidoo/mcp-memory-service/issues/160)
 
-**Root Cause**: Windows-specific subprocess lifecycle management bug in Claude Code's initialization phase. The parent process didn't properly detect subprocess completion during synchronous initialization.
-
-**Status**: ~~UNFIXABLE at hook level~~ → **FIXED in Claude Code 2.0.76+**
-
-**GitHub Issue**: [#160](https://github.com/doobidoo/mcp-memory-service/issues/160) - CLOSED
-
-**Previous Workaround** (no longer needed): Disable SessionStart hooks on Windows; use UserPromptSubmit hook instead
+**Workaround**: Disable SessionStart hooks on Windows; use UserPromptSubmit hook instead
 
 ---
 

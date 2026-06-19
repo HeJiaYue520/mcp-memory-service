@@ -57,15 +57,15 @@ function analyzeConversation(conversationData) {
             sessionLength: 0,
             confidence: 0
         };
-        
+
         if (!conversationData || !conversationData.messages) {
             return analysis;
         }
-        
+
         const messages = conversationData.messages;
         const conversationText = messages.map(msg => msg.content || '').join('\n').toLowerCase();
         analysis.sessionLength = conversationText.length;
-        
+
         // Extract topics (simple keyword matching)
         const topicKeywords = {
             'implementation': /implement|implementing|implementation|build|building|create|creating/g,
@@ -79,7 +79,7 @@ function analyzeConversation(conversationData) {
             'api': /api|endpoint|rest|graphql|service|interface/g,
             'ui': /ui|interface|frontend|component|styling|css|html/g
         };
-        
+
         Object.entries(topicKeywords).forEach(([topic, regex]) => {
             if (conversationText.match(regex)) {
                 analysis.topics.push(topic);
@@ -92,7 +92,7 @@ function analyzeConversation(conversationData) {
             /better to|prefer|recommend|should use|opt for/g,
             /concluded that|determined that|agreed to/g
         ];
-        
+
         messages.forEach(msg => {
             const content = (msg.content || '').toLowerCase();
             decisionPatterns.forEach(pattern => {
@@ -108,14 +108,14 @@ function analyzeConversation(conversationData) {
                 }
             });
         });
-        
+
         // Extract insights (look for learning language)
         const insightPatterns = [
             /learned that|discovered|realized|found out|turns out/g,
             /insight|understanding|conclusion|takeaway|lesson/g,
             /important to note|key finding|observation/g
         ];
-        
+
         messages.forEach(msg => {
             const content = (msg.content || '').toLowerCase();
             insightPatterns.forEach(pattern => {
@@ -129,14 +129,14 @@ function analyzeConversation(conversationData) {
                 }
             });
         });
-        
+
         // Extract code changes (look for technical implementations)
         const codePatterns = [
             /added|created|implemented|built|wrote/g,
             /modified|updated|changed|refactored|improved/g,
             /fixed|resolved|corrected|patched/g
         ];
-        
+
         messages.forEach(msg => {
             const content = msg.content || '';
             if (content.includes('```') || /\.(js|py|rs|go|java|cpp|c|ts|jsx|tsx)/.test(content)) {
@@ -154,14 +154,14 @@ function analyzeConversation(conversationData) {
                 });
             }
         });
-        
+
         // Extract next steps (look for future language)
         const nextStepsPatterns = [
             /next|todo|need to|should|will|plan to|going to/g,
             /follow up|continue|proceed|implement next|work on/g,
             /remaining|still need|outstanding|future/g
         ];
-        
+
         messages.forEach(msg => {
             const content = (msg.content || '').toLowerCase();
             nextStepsPatterns.forEach(pattern => {
@@ -175,23 +175,23 @@ function analyzeConversation(conversationData) {
                 }
             });
         });
-        
+
         // Calculate confidence based on extracted information
-        const totalExtracted = analysis.topics.length + analysis.decisions.length + 
-                              analysis.insights.length + analysis.codeChanges.length + 
+        const totalExtracted = analysis.topics.length + analysis.decisions.length +
+                              analysis.insights.length + analysis.codeChanges.length +
                               analysis.nextSteps.length;
-        
+
         analysis.confidence = Math.min(1.0, totalExtracted / 10); // Max confidence at 10+ items
-        
+
         // Limit arrays to prevent overwhelming output
-        // Topics: no limit needed (max 10 possible keywords)
+        analysis.topics = analysis.topics.slice(0, 5);
         analysis.decisions = analysis.decisions.slice(0, 3);
         analysis.insights = analysis.insights.slice(0, 3);
         analysis.codeChanges = analysis.codeChanges.slice(0, 4);
         analysis.nextSteps = analysis.nextSteps.slice(0, 4);
-        
+
         return analysis;
-        
+
     } catch (error) {
         console.error('[Memory Hook] Error analyzing conversation:', error.message);
         return {
@@ -205,64 +205,6 @@ function analyzeConversation(conversationData) {
             error: error.message
         };
     }
-}
-
-/**
- * Trigger quality evaluation for a stored memory (async, non-blocking)
- * This calls the backend's quality scoring system to pre-score the memory
- */
-function triggerQualityEvaluation(endpoint, apiKey, contentHash) {
-    return new Promise((resolve, reject) => {
-        const url = new URL(`/api/quality/memories/${contentHash}/evaluate`, endpoint);
-        const isHttps = url.protocol === 'https:';
-        const requestModule = isHttps ? https : http;
-
-        const postData = JSON.stringify({});
-
-        const options = {
-            hostname: url.hostname,
-            port: url.port || (isHttps ? 8443 : 8000),
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData),
-                'Authorization': `Bearer ${apiKey}`
-            },
-            timeout: 10000 // 10 second timeout for quality evaluation
-        };
-
-        if (isHttps) {
-            options.rejectUnauthorized = false;
-        }
-
-        const req = requestModule.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            res.on('end', () => {
-                try {
-                    const response = JSON.parse(data);
-                    resolve(response);
-                } catch (parseError) {
-                    resolve({ success: false, error: 'Parse error', data });
-                }
-            });
-        });
-
-        req.on('error', (error) => {
-            resolve({ success: false, error: error.message });
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-            resolve({ success: false, error: 'Quality evaluation timed out' });
-        });
-
-        req.write(postData);
-        req.end();
-    });
 }
 
 /**
@@ -356,41 +298,41 @@ function storeSessionMemory(endpoint, apiKey, content, projectContext, analysis)
 async function onSessionEnd(context) {
     try {
         console.log('[Memory Hook] Session ending - consolidating outcomes...');
-        
+
         // Load configuration
         const config = await loadConfig();
-        
+
         if (!config.memoryService.enableSessionConsolidation) {
             console.log('[Memory Hook] Session consolidation disabled in config');
             return;
         }
-        
+
         // Check if session is meaningful enough to store
         if (context.conversation && context.conversation.messages) {
             const totalLength = context.conversation.messages
                 .map(msg => (msg.content || '').length)
                 .reduce((sum, len) => sum + len, 0);
-                
+
             if (totalLength < config.sessionAnalysis.minSessionLength) {
                 console.log('[Memory Hook] Session too short for consolidation');
                 return;
             }
         }
-        
+
         // Detect project context
         const projectContext = await detectProjectContext(context.workingDirectory || process.cwd());
         console.log(`[Memory Hook] Consolidating session for project: ${projectContext.name}`);
-        
+
         // Analyze conversation
         const analysis = analyzeConversation(context.conversation);
-        
+
         if (analysis.confidence < 0.1) {
             console.log('[Memory Hook] Session analysis confidence too low, skipping consolidation');
             return;
         }
-        
+
         console.log(`[Memory Hook] Session analysis: ${analysis.topics.length} topics, ${analysis.decisions.length} decisions, confidence: ${(analysis.confidence * 100).toFixed(1)}%`);
-        
+
         // Format session consolidation
         const consolidation = formatSessionConsolidation(analysis, projectContext);
 
@@ -406,28 +348,16 @@ async function onSessionEnd(context) {
             projectContext,
             analysis
         );
-        
+
         if (result.success || result.content_hash) {
             console.log(`[Memory Hook] Session consolidation stored successfully`);
             if (result.content_hash) {
                 console.log(`[Memory Hook] Memory hash: ${result.content_hash.substring(0, 8)}...`);
-
-                // Trigger async quality evaluation (non-blocking)
-                triggerQualityEvaluation(endpoint, apiKey, result.content_hash)
-                    .then(evalResult => {
-                        if (evalResult.success) {
-                            console.log(`[Memory Hook] Quality evaluated: ${evalResult.quality_score?.toFixed(3)} (${evalResult.quality_provider})`);
-                        }
-                    })
-                    .catch(err => {
-                        // Don't fail the hook if quality evaluation fails
-                        console.warn('[Memory Hook] Quality evaluation skipped:', err.message);
-                    });
             }
         } else {
             console.warn('[Memory Hook] Failed to store session consolidation:', result.error || 'Unknown error');
         }
-        
+
     } catch (error) {
         console.error('[Memory Hook] Error in session end:', error.message);
         // Fail gracefully - don't prevent session from ending
@@ -447,178 +377,40 @@ module.exports = {
         async: true,
         timeout: 15000, // 15 second timeout
         priority: 'normal'
-    },
-    // Exported for testing
-    _internal: {
-        parseTranscript: null,  // Will be set after function definition
-        analyzeConversation
     }
 };
 
-/**
- * Read JSON context from stdin (provided by Claude Code)
- * Returns: { transcript_path, reason, cwd, session_id, ... }
- */
-async function readStdinContext() {
-    return new Promise((resolve, reject) => {
-        let data = '';
-
-        // Set a timeout in case stdin is empty or never closes
-        const timeout = setTimeout(() => {
-            resolve(null); // No stdin data - likely manual test run
-        }, 100);
-
-        process.stdin.setEncoding('utf8');
-        process.stdin.on('readable', () => {
-            let chunk;
-            while ((chunk = process.stdin.read()) !== null) {
-                data += chunk;
-            }
-        });
-
-        process.stdin.on('end', () => {
-            clearTimeout(timeout);
-            if (data.trim()) {
-                try {
-                    resolve(JSON.parse(data));
-                } catch (error) {
-                    console.error('[Memory Hook] Failed to parse stdin JSON:', error.message);
-                    reject(error);
-                }
-            } else {
-                resolve(null);
-            }
-        });
-
-        process.stdin.on('error', (error) => {
-            clearTimeout(timeout);
-            console.error('[Memory Hook] Stdin error:', error.message);
-            reject(error);
-        });
-    });
-}
-
-/**
- * Parse JSONL transcript file to extract conversation messages
- * @param {string} transcriptPath - Path to the .jsonl transcript file
- * @returns {Object} - { messages: Array<{role, content}> }
- */
-async function parseTranscript(transcriptPath) {
-    try {
-        const content = await fs.readFile(transcriptPath, 'utf8');
-        const lines = content.trim().split('\n');
-        const messages = [];
-
-        for (const line of lines) {
-            if (!line.trim()) continue;
-
-            try {
-                const entry = JSON.parse(line);
-
-                // Only process user and assistant messages
-                if (entry.type === 'user' || entry.type === 'assistant') {
-                    const msg = entry.message;
-                    if (msg && msg.role && msg.content) {
-                        // Handle content that can be string or array of content blocks
-                        let contentText = '';
-                        if (typeof msg.content === 'string') {
-                            contentText = msg.content;
-                        } else if (Array.isArray(msg.content)) {
-                            // Extract text from content blocks
-                            contentText = msg.content
-                                .filter(block => block.type === 'text')
-                                .map(block => block.text)
-                                .join('\n');
-                        }
-
-                        if (contentText) {
-                            messages.push({
-                                role: msg.role,
-                                content: contentText
-                            });
-                        }
-                    }
-                }
-            } catch (parseError) {
-                // Skip malformed lines
-                continue;
-            }
-        }
-
-        return { messages };
-    } catch (error) {
-        console.error('[Memory Hook] Failed to parse transcript:', error.message);
-        return { messages: [] };
-    }
-}
-
-// Set parseTranscript on exports for testing (after function is defined)
-module.exports._internal.parseTranscript = parseTranscript;
-
-/**
- * Mock conversation for manual testing (when no stdin/transcript available)
- */
-const mockConversation = {
-    messages: [
-        {
-            role: 'user',
-            content: 'I need to implement a memory awareness system for Claude Code'
-        },
-        {
-            role: 'assistant',
-            content: 'I\'ll help you create a memory awareness system. We decided to use hooks for session management and implement automatic context injection.'
-        },
-        {
-            role: 'user',
-            content: 'Great! I learned that we need project detection and memory scoring algorithms.'
-        },
-        {
-            role: 'assistant',
-            content: 'Exactly. I implemented the project detector in project-detector.js and created scoring algorithms. Next we need to test the complete system.'
-        }
-    ]
-};
-
-// Direct execution - reads stdin context from Claude Code
+// Direct execution support for testing
 if (require.main === module) {
-    (async () => {
-        try {
-            // Read context from stdin (Claude Code provides this)
-            const stdinContext = await readStdinContext();
-
-            let context;
-
-            if (stdinContext && stdinContext.transcript_path) {
-                // Real execution: parse transcript file
-                console.log(`[Memory Hook] Reading transcript: ${stdinContext.transcript_path}`);
-                console.log(`[Memory Hook] Session end reason: ${stdinContext.reason || 'unknown'}`);
-
-                const conversation = await parseTranscript(stdinContext.transcript_path);
-
-                context = {
-                    workingDirectory: stdinContext.cwd || process.cwd(),
-                    sessionId: stdinContext.session_id || 'unknown',
-                    reason: stdinContext.reason,
-                    conversation: conversation
-                };
-
-                console.log(`[Memory Hook] Parsed ${conversation.messages.length} messages from transcript`);
-            } else {
-                // Manual test: use mock data
-                console.log('[Memory Hook] No stdin context - using mock data for testing');
-                context = {
-                    workingDirectory: process.cwd(),
-                    sessionId: 'test-session',
-                    conversation: mockConversation
-                };
+    // Test the hook with mock context
+    const mockConversation = {
+        messages: [
+            {
+                role: 'user',
+                content: 'I need to implement a memory awareness system for Claude Code'
+            },
+            {
+                role: 'assistant',
+                content: 'I\'ll help you create a memory awareness system. We decided to use hooks for session management and implement automatic context injection.'
+            },
+            {
+                role: 'user',
+                content: 'Great! I learned that we need project detection and memory scoring algorithms.'
+            },
+            {
+                role: 'assistant',
+                content: 'Exactly. I implemented the project detector in project-detector.js and created scoring algorithms. Next we need to test the complete system.'
             }
+        ]
+    };
 
-            await onSessionEnd(context);
-            console.log('Session end hook completed');
+    const mockContext = {
+        workingDirectory: process.cwd(),
+        sessionId: 'test-session',
+        conversation: mockConversation
+    };
 
-        } catch (error) {
-            console.error('Session end hook failed:', error);
-            process.exit(1);
-        }
-    })();
+    onSessionEnd(mockContext)
+        .then(() => console.log('Session end hook test completed'))
+        .catch(error => console.error('Session end hook test failed:', error));
 }

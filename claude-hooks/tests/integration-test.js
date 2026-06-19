@@ -6,9 +6,7 @@
  */
 
 const fs = require('fs');
-const fsPromises = require('fs').promises;
 const path = require('path');
-const os = require('os');
 
 // Import hooks and utilities
 const sessionStartHook = require('../core/session-start');
@@ -26,7 +24,7 @@ class TestResults {
         this.passed = 0;
         this.failed = 0;
     }
-    
+
     test(name, testFn) {
         console.log(`\n🧪 Testing: ${name}`);
         try {
@@ -46,7 +44,7 @@ class TestResults {
             this.tests.push({ name, status: 'FAIL', error: error.message });
         }
     }
-    
+
     async asyncTest(name, testFn) {
         console.log(`\n🧪 Testing: ${name}`);
         try {
@@ -66,7 +64,7 @@ class TestResults {
             this.tests.push({ name, status: 'FAIL', error: error.message });
         }
     }
-    
+
     summary() {
         console.log('\n' + '='.repeat(60));
         console.log('🎯 TEST SUMMARY');
@@ -75,14 +73,14 @@ class TestResults {
         console.log(`✅ Passed: ${this.passed}`);
         console.log(`❌ Failed: ${this.failed}`);
         console.log(`Success Rate: ${((this.passed / this.tests.length) * 100).toFixed(1)}%`);
-        
+
         if (this.failed > 0) {
             console.log('\n🔍 FAILED TESTS:');
             this.tests.filter(t => t.status === 'FAIL').forEach(test => {
                 console.log(`  - ${test.name}: ${test.error}`);
             });
         }
-        
+
         console.log('='.repeat(60));
         return this.failed === 0;
     }
@@ -146,7 +144,7 @@ const mockConversation = {
             content: 'I need to implement a memory awareness system for Claude Code that automatically injects relevant project memories.'
         },
         {
-            role: 'assistant', 
+            role: 'assistant',
             content: 'I\'ll help you create a comprehensive memory awareness system. We decided to use Claude Code hooks for session management and implement automatic context injection. This will include project detection, memory scoring, and intelligent context formatting.'
         },
         {
@@ -166,99 +164,99 @@ const mockConversation = {
 async function runTests() {
     console.log('🚀 Claude Code Memory Awareness - Integration Tests');
     console.log('Testing Phase 1 Implementation\n');
-    
+
     const results = new TestResults();
-    
+
     // Test 1: Project Detection
     await results.asyncTest('Project Detection', async () => {
         const context = await detectProjectContext(process.cwd());
-        
+
         if (!context.name) {
             return { success: false, error: 'No project name detected' };
         }
-        
+
         if (!context.language) {
             return { success: false, error: 'No language detected' };
         }
-        
+
         console.log(`  Detected: ${context.name} (${context.language}), Confidence: ${(context.confidence * 100).toFixed(1)}%`);
         return { success: true, context };
     });
-    
+
     // Test 2: Memory Relevance Scoring
     results.test('Memory Relevance Scoring', () => {
         const scored = scoreMemoryRelevance(mockMemories, mockProjectContext);
-        
+
         if (!Array.isArray(scored)) {
             return { success: false, error: 'Scoring did not return array' };
         }
-        
+
         if (scored.length !== mockMemories.length) {
             return { success: false, error: 'Scoring lost memories' };
         }
-        
+
         // Check that memories have scores
         for (const memory of scored) {
             if (typeof memory.relevanceScore !== 'number') {
                 return { success: false, error: 'Memory missing relevance score' };
             }
         }
-        
+
         // Check that memories are sorted by relevance (highest first)
         for (let i = 1; i < scored.length; i++) {
             if (scored[i].relevanceScore > scored[i-1].relevanceScore) {
                 return { success: false, error: 'Memories not sorted by relevance' };
             }
         }
-        
+
         console.log(`  Scored ${scored.length} memories, top score: ${scored[0].relevanceScore.toFixed(3)}`);
         return { success: true, scored };
     });
-    
+
     // Test 3: Context Formatting
     results.test('Context Formatting', () => {
         const scored = scoreMemoryRelevance(mockMemories, mockProjectContext);
         const formatted = formatMemoriesForContext(scored, mockProjectContext);
-        
+
         if (typeof formatted !== 'string') {
             return { success: false, error: 'Formatting did not return string' };
         }
-        
+
         if (formatted.length < 100) {
             return { success: false, error: 'Formatted context too short' };
         }
-        
+
         // Check for key formatting elements
         if (!formatted.includes('Memory Context')) {
             return { success: false, error: 'Missing memory context header' };
         }
-        
+
         if (!formatted.includes(mockProjectContext.name)) {
             return { success: false, error: 'Missing project name in context' };
         }
-        
+
         console.log(`  Generated ${formatted.length} characters of formatted context`);
         return { success: true, formatted };
     });
-    
+
     // Test 4: Session Start Hook Structure
     results.test('Session Start Hook Structure', () => {
         if (typeof sessionStartHook.handler !== 'function') {
             return { success: false, error: 'Session start hook missing handler function' };
         }
-        
+
         if (!sessionStartHook.name || !sessionStartHook.version) {
             return { success: false, error: 'Session start hook missing metadata' };
         }
-        
+
         if (sessionStartHook.trigger !== 'session-start') {
             return { success: false, error: 'Session start hook wrong trigger' };
         }
-        
+
         console.log(`  Hook: ${sessionStartHook.name} v${sessionStartHook.version}`);
         return { success: true };
     });
-    
+
     // Test 5: Session End Hook Structure
     results.test('Session End Hook Structure', () => {
         if (typeof sessionEndHook.handler !== 'function') {
@@ -275,114 +273,6 @@ async function runTests() {
 
         console.log(`  Hook: ${sessionEndHook.name} v${sessionEndHook.version}`);
         return { success: true };
-    });
-
-    // Test 5a: parseTranscript - String content messages
-    await results.asyncTest('parseTranscript: String content messages', async () => {
-        const { parseTranscript } = sessionEndHook._internal;
-        if (!parseTranscript) {
-            return { success: false, error: 'parseTranscript not exported' };
-        }
-
-        const entries = [
-            { type: 'user', message: { role: 'user', content: 'Hello, how are you?' } },
-            { type: 'assistant', message: { role: 'assistant', content: 'I am doing well!' } }
-        ];
-        const tmpFile = path.join(os.tmpdir(), `test-transcript-${Date.now()}.jsonl`);
-        await fsPromises.writeFile(tmpFile, entries.map(e => JSON.stringify(e)).join('\n'), 'utf8');
-
-        try {
-            const result = await parseTranscript(tmpFile);
-            if (result.messages.length !== 2) {
-                return { success: false, error: `Expected 2 messages, got ${result.messages.length}` };
-            }
-            if (result.messages[0].content !== 'Hello, how are you?') {
-                return { success: false, error: `Unexpected content: ${result.messages[0].content}` };
-            }
-            console.log(`  Parsed ${result.messages.length} messages from JSONL`);
-            return { success: true };
-        } finally {
-            await fsPromises.unlink(tmpFile).catch(() => {});
-        }
-    });
-
-    // Test 5b: parseTranscript - Array content blocks
-    await results.asyncTest('parseTranscript: Array content blocks', async () => {
-        const { parseTranscript } = sessionEndHook._internal;
-        const entries = [
-            {
-                type: 'assistant',
-                message: {
-                    role: 'assistant',
-                    content: [
-                        { type: 'text', text: 'First part.' },
-                        { type: 'text', text: 'Second part.' }
-                    ]
-                }
-            }
-        ];
-        const tmpFile = path.join(os.tmpdir(), `test-transcript-${Date.now()}.jsonl`);
-        await fsPromises.writeFile(tmpFile, entries.map(e => JSON.stringify(e)).join('\n'), 'utf8');
-
-        try {
-            const result = await parseTranscript(tmpFile);
-            if (result.messages.length !== 1) {
-                return { success: false, error: `Expected 1 message, got ${result.messages.length}` };
-            }
-            if (!result.messages[0].content.includes('First part')) {
-                return { success: false, error: 'Missing first part in content' };
-            }
-            console.log(`  Correctly joined array content blocks`);
-            return { success: true };
-        } finally {
-            await fsPromises.unlink(tmpFile).catch(() => {});
-        }
-    });
-
-    // Test 5c: parseTranscript - Skips non-user/assistant entries
-    await results.asyncTest('parseTranscript: Skips non-message entries', async () => {
-        const { parseTranscript } = sessionEndHook._internal;
-        const entries = [
-            { type: 'file-history-snapshot', message: null },
-            { type: 'user', message: { role: 'user', content: 'Hello' } },
-            { type: 'system', message: { role: 'system', content: 'System msg' } }
-        ];
-        const tmpFile = path.join(os.tmpdir(), `test-transcript-${Date.now()}.jsonl`);
-        await fsPromises.writeFile(tmpFile, entries.map(e => JSON.stringify(e)).join('\n'), 'utf8');
-
-        try {
-            const result = await parseTranscript(tmpFile);
-            if (result.messages.length !== 1) {
-                return { success: false, error: `Expected 1 message (user only), got ${result.messages.length}` };
-            }
-            console.log(`  Correctly filtered to user/assistant messages only`);
-            return { success: true };
-        } finally {
-            await fsPromises.unlink(tmpFile).catch(() => {});
-        }
-    });
-
-    // Test 5d: parseTranscript - Handles malformed JSON gracefully
-    await results.asyncTest('parseTranscript: Handles malformed JSON', async () => {
-        const { parseTranscript } = sessionEndHook._internal;
-        const tmpFile = path.join(os.tmpdir(), `test-transcript-${Date.now()}.jsonl`);
-        const content = [
-            JSON.stringify({ type: 'user', message: { role: 'user', content: 'Valid' } }),
-            'not valid json {{{',
-            JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'Also valid' } })
-        ].join('\n');
-        await fsPromises.writeFile(tmpFile, content, 'utf8');
-
-        try {
-            const result = await parseTranscript(tmpFile);
-            if (result.messages.length !== 2) {
-                return { success: false, error: `Expected 2 messages (skipping malformed), got ${result.messages.length}` };
-            }
-            console.log(`  Gracefully skipped malformed JSON line`);
-            return { success: true };
-        } finally {
-            await fsPromises.unlink(tmpFile).catch(() => {});
-        }
     });
 
     // Test 6: Configuration Loading
@@ -414,31 +304,31 @@ async function runTests() {
             return { success: false, error: `Configuration parse error: ${error.message}` };
         }
     });
-    
+
     // Test 7: File Structure
     results.test('File Structure Validation', () => {
         const requiredFiles = [
             '../core/session-start.js',
             '../core/session-end.js',
             '../utilities/project-detector.js',
-            '../utilities/memory-scorer.js', 
+            '../utilities/memory-scorer.js',
             '../utilities/context-formatter.js',
             '../config.json',
             '../config.template.json',
             '../README.md'
         ];
-        
+
         for (const file of requiredFiles) {
             const fullPath = path.join(__dirname, file);
             if (!fs.existsSync(fullPath)) {
                 return { success: false, error: `Missing required file: ${file}` };
             }
         }
-        
+
         console.log(`  All ${requiredFiles.length} required files present`);
         return { success: true };
     });
-    
+
     // Test 8: Mock Session Start (Limited Test)
     await results.asyncTest('Mock Session Start Hook', async () => {
         const mockContext = {
@@ -452,7 +342,7 @@ async function runTests() {
                 return true;
             }
         };
-        
+
         try {
             // Note: This will attempt to contact the memory service
             // In a real test environment, we'd mock this
@@ -471,11 +361,11 @@ async function runTests() {
             throw error;
         }
     });
-    
+
     // Test 9: Package Dependencies
     results.test('Package Dependencies Check', () => {
         const requiredModules = ['fs', 'path', 'https', 'child_process'];
-        
+
         for (const module of requiredModules) {
             try {
                 require(module);
@@ -483,83 +373,83 @@ async function runTests() {
                 return { success: false, error: `Missing required module: ${module}` };
             }
         }
-        
+
         console.log(`  All ${requiredModules.length} required Node.js modules available`);
         return { success: true };
     });
-    
+
     // Test 10: Claude Code Settings Validation
     results.test('Claude Code Settings Configuration', () => {
         const settingsPath = path.join(process.env.HOME, '.claude', 'settings.json');
-        
+
         if (!fs.existsSync(settingsPath)) {
             return { success: false, error: 'Claude Code settings.json not found' };
         }
-        
+
         try {
             const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-            
+
             // Check for hooks configuration
             if (!settings.hooks) {
                 return { success: false, error: 'No hooks configuration found in settings' };
             }
-            
+
             // Check for SessionStart hook
             if (!settings.hooks.SessionStart || !Array.isArray(settings.hooks.SessionStart)) {
                 return { success: false, error: 'SessionStart hooks not configured' };
             }
-            
+
             // Check for SessionEnd hook
             if (!settings.hooks.SessionEnd || !Array.isArray(settings.hooks.SessionEnd)) {
                 return { success: false, error: 'SessionEnd hooks not configured' };
             }
-            
+
             // Check hook command paths
             const startHook = JSON.stringify(settings.hooks.SessionStart);
             const endHook = JSON.stringify(settings.hooks.SessionEnd);
-            
+
             if (!startHook.includes('session-start.js')) {
                 return { success: false, error: 'SessionStart hook command not configured correctly' };
             }
-            
+
             if (!endHook.includes('session-end.js')) {
                 return { success: false, error: 'SessionEnd hook command not configured correctly' };
             }
-            
+
             console.log('  Claude Code settings configured correctly');
             return { success: true, settings };
-            
+
         } catch (parseError) {
             return { success: false, error: `Settings parse error: ${parseError.message}` };
         }
     });
-    
+
     // Test 11: Hook Files Location Validation
     results.test('Hook Files in Correct Location', () => {
         const hookDir = path.join(process.env.HOME, '.claude', 'hooks');
         const requiredHooks = [
             'core/session-start.js',
-            'core/session-end.js', 
+            'core/session-end.js',
             'utilities/project-detector.js',
             'utilities/memory-scorer.js',
             'utilities/context-formatter.js'
         ];
-        
+
         for (const hookFile of requiredHooks) {
             const fullPath = path.join(hookDir, hookFile);
             if (!fs.existsSync(fullPath)) {
                 return { success: false, error: `Hook file missing: ${hookFile}` };
             }
         }
-        
+
         console.log(`  All hooks installed in ${hookDir}`);
         return { success: true };
     });
-    
+
     // Test 12: Claude Code CLI Availability
     results.test('Claude Code CLI Availability', () => {
         const { execSync } = require('child_process');
-        
+
         try {
             execSync('which claude', { stdio: 'pipe' });
             console.log('  Claude Code CLI available');
@@ -568,7 +458,7 @@ async function runTests() {
             return { success: false, error: 'Claude Code CLI not found in PATH' };
         }
     });
-    
+
     // Test 13: Memory Service Protocol
     results.test('Memory Service Protocol Compatibility', () => {
         // Test that we're generating the correct MCP JSON-RPC calls
@@ -585,22 +475,22 @@ async function runTests() {
                 }
             }
         };
-        
+
         const serialized = JSON.stringify(testCall);
         const parsed = JSON.parse(serialized);
-        
+
         if (!parsed.jsonrpc || parsed.jsonrpc !== '2.0') {
             return { success: false, error: 'Invalid JSON-RPC format' };
         }
-        
+
         if (!parsed.params || !parsed.params.name || !parsed.params.arguments) {
             return { success: false, error: 'Invalid MCP call structure' };
         }
-        
+
         console.log(`  MCP protocol structure valid`);
         return { success: true };
     });
-    
+
     // Test 14: Memory Service Connectivity
     await results.asyncTest('Memory Service Connectivity', async () => {
         const configPath = path.join(__dirname, '../config.json');
@@ -619,11 +509,11 @@ async function runTests() {
             if (!endpoint) {
                 return { success: false, error: 'No memory service endpoint configured (checked both old and new format)' };
             }
-            
+
             // Test basic connectivity (simplified test)
             const https = require('https');
             const url = new URL('/api/health', endpoint);
-            
+
             return new Promise((resolve) => {
                 const options = {
                     hostname: url.hostname,
@@ -633,7 +523,7 @@ async function runTests() {
                     timeout: 5000,
                     rejectUnauthorized: false
                 };
-                
+
                 const req = https.request(options, (res) => {
                     console.log(`  Memory service responded with status: ${res.statusCode}`);
                     if (res.statusCode === 200 || res.statusCode === 401) {
@@ -643,7 +533,7 @@ async function runTests() {
                         resolve({ success: false, error: `Service returned status: ${res.statusCode}` });
                     }
                 });
-                
+
                 req.on('error', (error) => {
                     // Mark as success with warning if service isn't running (expected in test environments)
                     console.log(`  ⚠️  Memory service not available: ${error.message}`);
@@ -656,18 +546,18 @@ async function runTests() {
                     console.log('  This is expected if the service is not running during tests');
                     resolve({ success: true });
                 });
-                
+
                 req.end();
             });
-            
+
         } catch (parseError) {
             return { success: false, error: `Configuration parse error: ${parseError.message}` };
         }
     });
-    
+
     // Display summary
     const allTestsPassed = results.summary();
-    
+
     if (allTestsPassed) {
         console.log('\n🎉 ALL TESTS PASSED! Phase 1 implementation is ready.');
         console.log('\n📋 Next Steps:');
@@ -678,7 +568,7 @@ async function runTests() {
     } else {
         console.log('\n⚠️  Some tests failed. Please fix issues before proceeding.');
     }
-    
+
     return allTestsPassed;
 }
 

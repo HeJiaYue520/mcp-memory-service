@@ -12,25 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Storage backend for MCP Memory Service.
+
+Provides:
+- MemoryStorage: ABC defining storage interface
+- QdrantStorage: Qdrant vector database backend (production)
+"""
+
 from .base import MemoryStorage
+from .qdrant_storage import QdrantStorage
 
-# Conditional imports based on available dependencies
-__all__ = ['MemoryStorage']
-
-try:
-    from .sqlite_vec import SqliteVecMemoryStorage
-    __all__.append('SqliteVecMemoryStorage')
-except ImportError:
-    SqliteVecMemoryStorage = None
-
-try:
-    from .cloudflare import CloudflareStorage
-    __all__.append('CloudflareStorage')
-except ImportError:
-    CloudflareStorage = None
-
-try:
-    from .hybrid import HybridMemoryStorage
-    __all__.append('HybridMemoryStorage')
-except ImportError:
-    HybridMemoryStorage = None
+__all__ = [
+    "MemoryStorage",
+    "QdrantStorage",
+]

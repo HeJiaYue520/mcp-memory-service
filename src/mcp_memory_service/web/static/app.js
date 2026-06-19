@@ -3,8 +3,6 @@
  * Interactive frontend for memory management with real-time updates
  */
 
-console.log('⚡ app.js loading - TOP OF FILE');
-
 class MemoryDashboard {
     // Delay between individual file uploads to avoid overwhelming the server (ms)
     static INDIVIDUAL_UPLOAD_DELAY = 500;
@@ -65,12 +63,6 @@ class MemoryDashboard {
         this.eventSource = null;
         this.memories = [];
         this.currentView = 'dashboard';
-        // 国际化状态
-        this.currentLang = 'en';
-        this.translations = {};
-        this.fallbackTranslations = {};
-        this.supportedLanguages = ['en', 'zh'];
-        this.languageMetadata = {}; // Stores language metadata (flags, names, etc.)
         this.searchResults = [];
         this.isLoading = false;
         this.liveSearchEnabled = true;
@@ -102,7 +94,6 @@ class MemoryDashboard {
      * Initialize the application
      */
     async init() {
-        await this.initI18n();
         this.loadSettings();
         this.applyTheme();
         this.setupEventListeners();
@@ -117,308 +108,12 @@ class MemoryDashboard {
     }
 
     /**
-     * 初始化国际化：检测语言，加载词典并应用
-     */
-    async initI18n() {
-        await this.detectAvailableLanguages(); // Dynamically detect available languages
-        await this.loadLanguageMetadata(); // Load metadata for all languages
-        this.currentLang = this.detectLanguage();
-        await this.ensureFallbackTranslations();
-        await this.loadTranslations(this.currentLang);
-        await this.buildLanguageSelector(); // Build dropdown dynamically
-        await this.applyTranslations();
-    }
-
-    /**
-     * 语言检测：localStorage > 浏览器语言前缀 > en
-     */
-    detectLanguage() {
-        const stored = localStorage.getItem('memoryDashboardLang');
-        if (stored && this.supportedLanguages.includes(stored)) {
-            return stored;
-        }
-        const browserLang = (navigator.language || navigator.userLanguage || '').toLowerCase();
-        if (browserLang.startsWith('zh')) return 'zh';
-        return 'en';
-    }
-
-    /**
-     * 确保英文词典作为回退存在
-     */
-    async ensureFallbackTranslations() {
-        if (Object.keys(this.fallbackTranslations).length > 0) return;
-        try {
-            const response = await fetch('/static/i18n/en.json');
-            if (response.ok) {
-                this.fallbackTranslations = await response.json();
-            }
-        } catch (error) {
-            console.warn('Failed to load fallback translations', error);
-            this.fallbackTranslations = {};
-        }
-    }
-
-    /**
-     * Dynamically detect available languages from API
-     */
-    async detectAvailableLanguages() {
-        try {
-            const response = await fetch('/api/languages');
-            if (response.ok) {
-                const data = await response.json();
-                this.supportedLanguages = data.languages || ['en'];
-            }
-        } catch (error) {
-            console.warn('Failed to fetch language list, using defaults:', error);
-            this.supportedLanguages = ['en', 'zh'];
-        }
-    }
-
-    /**
-     * Load language metadata (flags, native names) from translation files
-     */
-    async loadLanguageMetadata() {
-        for (const lang of this.supportedLanguages) {
-            try {
-                const response = await fetch(`/static/i18n/${lang}.json`);
-                if (response.ok) {
-                    const data = await response.json();
-                    this.languageMetadata[lang] = {
-                        code: data['meta.language.code'] || lang,
-                        nativeName: data['meta.language.nativeName'] || lang.toUpperCase(),
-                        englishName: data['meta.language.englishName'] || lang.toUpperCase(),
-                        flag: data['meta.language.flag'] || '🌐'
-                    };
-                }
-            } catch (error) {
-                console.warn(`Failed to load metadata for ${lang}:`, error);
-                // Fallback metadata
-                this.languageMetadata[lang] = {
-                    code: lang,
-                    nativeName: lang.toUpperCase(),
-                    englishName: lang.toUpperCase(),
-                    flag: '🌐'
-                };
-            }
-        }
-    }
-
-    /**
-     * Build language selector dropdown dynamically
-     */
-    async buildLanguageSelector() {
-        const dropdown = document.querySelector('.lang-dropdown-menu');
-        if (!dropdown) return;
-
-        // Clear existing options
-        dropdown.innerHTML = '';
-
-        // Create option for each language
-        this.supportedLanguages.forEach(lang => {
-            const meta = this.languageMetadata[lang];
-            if (!meta) return;
-
-            const option = document.createElement('button');
-            option.className = 'lang-option';
-            option.dataset.lang = lang;
-            option.setAttribute('role', 'menuitem');
-            option.setAttribute('type', 'button');
-
-            // Build option HTML
-            option.innerHTML = `
-                <span class="lang-flag">${meta.flag}</span>
-                <span class="lang-name">${meta.nativeName}</span>
-                <svg class="lang-check" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
-                </svg>
-            `;
-
-            // Add click handler
-            option.addEventListener('click', async (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                await this.setLanguage(lang);
-                this.toggleLanguageDropdown(false);
-            });
-
-            dropdown.appendChild(option);
-        });
-    }
-
-    /**
-     * Toggle language dropdown visibility
-     */
-    toggleLanguageDropdown(show) {
-        const trigger = document.querySelector('.lang-dropdown-trigger');
-        const dropdown = document.querySelector('.lang-dropdown-menu');
-
-        if (!trigger || !dropdown) return;
-
-        if (show === undefined) {
-            // Toggle
-            show = dropdown.hasAttribute('hidden');
-        }
-
-        if (show) {
-            dropdown.removeAttribute('hidden');
-            trigger.setAttribute('aria-expanded', 'true');
-        } else {
-            dropdown.setAttribute('hidden', '');
-            trigger.setAttribute('aria-expanded', 'false');
-        }
-    }
-
-    /**
-     * 加载指定语言词典
-     */
-    async loadTranslations(lang) {
-        try {
-            const response = await fetch(`/static/i18n/${lang}.json`);
-            if (response.ok) {
-                this.translations = await response.json();
-                this.currentLang = lang;
-                localStorage.setItem('memoryDashboardLang', lang);
-                return;
-            }
-        } catch (error) {
-            console.warn('Failed to load translations for', lang, error);
-        }
-        // 回退到英文
-        this.translations = this.fallbackTranslations;
-        this.currentLang = 'en';
-        localStorage.setItem('memoryDashboardLang', 'en');
-    }
-
-    /**
-     * 获取翻译，带占位符替换
-     */
-    t(key, fallback = '', vars = {}) {
-        const fromCurrent = this.translations?.[key];
-        const fromFallback = this.fallbackTranslations?.[key];
-        const template = fromCurrent || fromFallback || fallback || key;
-        return this.replacePlaceholders(template, vars);
-    }
-
-    replacePlaceholders(str, vars) {
-        return str.replace(/\{(.*?)\}/g, (_, k) => vars[k] ?? `{${k}}`);
-    }
-
-    /**
-     * 应用翻译到 DOM
-     */
-    async applyTranslations() {
-        // 统一遍历带 i18n 属性的元素，减少多次 DOM 遍历
-        document.querySelectorAll('[data-i18n], [data-i18n-html], [data-i18n-placeholder], [data-i18n-aria]').forEach(el => {
-            const { i18n, i18nHtml, i18nPlaceholder, i18nAria } = el.dataset;
-
-            if (i18n) {
-                const text = this.t(i18n, el.textContent?.trim() || '');
-                if (text) el.textContent = text;
-            }
-
-            if (i18nHtml) {
-                const html = this.t(i18nHtml, el.innerHTML.trim() || '');
-                if (html) el.innerHTML = html;
-            }
-
-            if (i18nPlaceholder) {
-                const text = this.t(i18nPlaceholder, el.getAttribute('placeholder') || '');
-                el.setAttribute('placeholder', text);
-            }
-
-            if (i18nAria) {
-                const text = this.t(i18nAria, el.getAttribute('aria-label') || '');
-                el.setAttribute('aria-label', text);
-            }
-        });
-
-        // 文档标题
-        document.title = this.t('meta.title', document.title);
-
-        // 搜索模式文案
-        const modeText = document.getElementById('searchModeText');
-        if (modeText) {
-            modeText.textContent = this.liveSearchEnabled
-                ? this.t('search.modeLive', modeText.textContent)
-                : this.t('search.modeManual', modeText.textContent);
-        }
-
-        // 更新语言按钮状态
-        this.updateLanguageSwitcher();
-    }
-
-    /**
-     * 切换语言
-     */
-    async setLanguage(lang) {
-        if (!this.supportedLanguages.includes(lang) || lang === this.currentLang) return;
-        await this.loadTranslations(lang);
-        await this.applyTranslations();
-        this.showToast(this.t('toast.languageSwitched', 'Language switched'), 'success', 2000);
-    }
-
-    /**
-     * 更新语言选择器状态
-     * Update language selector (dropdown trigger text and active option)
-     */
-    updateLanguageSwitcher() {
-        const trigger = document.querySelector('.lang-dropdown-trigger');
-        const currentLangSpan = trigger?.querySelector('.lang-current');
-        const options = document.querySelectorAll('.lang-option');
-
-        // Update trigger text with current language native name
-        if (currentLangSpan && this.languageMetadata[this.currentLang]) {
-            const meta = this.languageMetadata[this.currentLang];
-            currentLangSpan.textContent = meta.nativeName;
-        }
-
-        // Update active state for dropdown options
-        options.forEach(option => {
-            const isActive = option.dataset.lang === this.currentLang;
-            option.classList.toggle('active', isActive);
-        });
-    }
-
-    /**
      * Set up event listeners for UI interactions
      */
     setupEventListeners() {
-        console.log('⚡ setupEventListeners() called');
         // Navigation
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', this.handleNavigation);
-        });
-
-        // Language dropdown
-        const langTrigger = document.querySelector('.lang-dropdown-trigger');
-        const langDropdown = document.querySelector('.lang-dropdown-menu');
-
-        if (langTrigger) {
-            // Toggle dropdown on trigger click
-            langTrigger.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.toggleLanguageDropdown();
-            });
-
-            // Keyboard navigation
-            langTrigger.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    this.toggleLanguageDropdown();
-                } else if (e.key === 'Escape') {
-                    this.toggleLanguageDropdown(false);
-                }
-            });
-        }
-
-        // Close dropdown when clicking outside
-        document.addEventListener('click', (e) => {
-            if (langDropdown && !langDropdown.hasAttribute('hidden')) {
-                const isClickInside = langTrigger?.contains(e.target) || langDropdown.contains(e.target);
-                if (!isClickInside) {
-                    this.toggleLanguageDropdown(false);
-                }
-            }
         });
 
         // Search functionality
@@ -588,25 +283,6 @@ class MemoryDashboard {
                 }
             };
 
-            // Add specific event listeners for sync progress
-            this.eventSource.addEventListener('sync_progress', (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    this.handleSyncProgress(data);
-                } catch (error) {
-                    console.error('Error parsing sync_progress event:', error);
-                }
-            });
-
-            this.eventSource.addEventListener('sync_completed', (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    this.handleSyncCompleted(data);
-                } catch (error) {
-                    console.error('Error parsing sync_completed event:', error);
-                }
-            });
-
             this.eventSource.onerror = (error) => {
                 console.error('SSE connection error:', error);
                 this.updateConnectionStatus('disconnected');
@@ -632,15 +308,15 @@ class MemoryDashboard {
         switch (data.type) {
             case 'memory_added':
                 this.handleMemoryAdded(data.memory);
-                this.showToast(this.t('toast.memoryAdded', 'Memory added successfully'), 'success');
+                this.showToast('Memory added successfully', 'success');
                 break;
             case 'memory_deleted':
                 this.handleMemoryDeleted(data.memory_id);
-                this.showToast(this.t('toast.memoryDeleted', 'Memory deleted'), 'success');
+                this.showToast('Memory deleted', 'success');
                 break;
             case 'memory_updated':
                 this.handleMemoryUpdated(data.memory);
-                this.showToast(this.t('toast.memoryUpdated', 'Memory updated'), 'success');
+                this.showToast('Memory updated', 'success');
                 break;
             case 'stats_updated':
                 this.updateDashboardStats(data.stats);
@@ -648,67 +324,6 @@ class MemoryDashboard {
             default:
                 // Unknown event type - ignore silently
         }
-    }
-
-    /**
-     * Handle sync progress updates from SSE
-     */
-    handleSyncProgress(data) {
-        console.log('Sync progress:', data);
-
-        // Update sync status display if visible
-        const syncStatus = document.getElementById('syncStatus');
-        if (syncStatus) {
-            const progressText = `Syncing: ${data.synced_count}/${data.total_count} (${data.progress_percentage}%)`;
-            syncStatus.textContent = progressText;
-            syncStatus.className = 'sync-status syncing';
-        }
-
-        // Update memory count in real-time if on dashboard
-        if (this.currentView === 'dashboard') {
-            const memoryCountElement = document.getElementById('totalMemories');
-            if (memoryCountElement && data.synced_count) {
-                // Refresh the detailed health to get accurate count
-                this.loadDashboardData().catch(err => console.error('Error refreshing dashboard:', err));
-            }
-        }
-
-        // Show toast notification for manual sync
-        if (data.sync_type === 'manual') {
-            this.showToast(
-                data.message || this.t('toast.syncing', 'Syncing: {synced}/{total}', {
-                    synced: data.synced_count,
-                    total: data.total_count
-                }),
-                'info'
-            );
-        }
-    }
-
-    /**
-     * Handle sync completion from SSE
-     */
-    handleSyncCompleted(data) {
-        console.log('Sync completed:', data);
-
-        // Update sync status display
-        const syncStatus = document.getElementById('syncStatus');
-        if (syncStatus) {
-            syncStatus.textContent = 'Synced';
-            syncStatus.className = 'sync-status synced';
-        }
-
-        // Refresh dashboard data to show updated counts
-        if (this.currentView === 'dashboard') {
-            this.loadDashboardData().catch(err => console.error('Error refreshing dashboard:', err));
-        }
-
-        // Also refresh sync status for hybrid mode
-        this.checkSyncStatus().catch(err => console.error('Error checking sync status:', err));
-
-        // Show completion notification
-        const message = data.message || `Sync completed: ${data.synced_count} memories synced`;
-        this.showToast(message, 'success');
     }
 
     /**
@@ -753,7 +368,7 @@ class MemoryDashboard {
 
         } catch (error) {
             console.error('Error loading dashboard data:', error);
-            this.showToast(this.t('toast.loadDashboardFail', 'Failed to load dashboard data'), 'error');
+            this.showToast('Failed to load dashboard data', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -773,7 +388,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Error loading browse data:', error);
-            this.showToast(this.t('toast.loadBrowseFail', 'Failed to load browse data'), 'error');
+            this.showToast('Failed to load browse data', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -791,7 +406,7 @@ class MemoryDashboard {
             this.setupDocumentsEventListeners();
         } catch (error) {
             console.error('Error loading documents data:', error);
-            this.showToast(this.t('toast.loadDocumentsFail', 'Failed to load documents data'), 'error');
+            this.showToast('Failed to load documents data', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -932,15 +547,14 @@ class MemoryDashboard {
             });
         }
 
-        // Configuration controls - cache for performance
-        this.chunkSizeInput = document.getElementById('chunkSize');
-        this.chunkOverlapInput = document.getElementById('chunkOverlap');
-        this.memoryTypeInput = document.getElementById('memoryType');
+        // Configuration controls
+        const chunkSizeInput = document.getElementById('chunkSize');
+        const chunkOverlapInput = document.getElementById('chunkOverlap');
         const chunkSizeValue = document.getElementById('chunkSizeValue');
         const chunkOverlapValue = document.getElementById('chunkOverlapValue');
 
-        if (this.chunkSizeInput && chunkSizeValue) {
-            this.chunkSizeInput.addEventListener('input', (e) => {
+        if (chunkSizeInput && chunkSizeValue) {
+            chunkSizeInput.addEventListener('input', (e) => {
                 chunkSizeValue.textContent = e.target.value;
                 this.updateUploadButton();
             });
@@ -970,26 +584,25 @@ class MemoryDashboard {
             });
         }
 
-        if (this.chunkOverlapInput && chunkOverlapValue) {
-            this.chunkOverlapInput.addEventListener('input', (e) => {
+        if (chunkOverlapInput && chunkOverlapValue) {
+            chunkOverlapInput.addEventListener('input', (e) => {
                 chunkOverlapValue.textContent = e.target.value;
                 this.updateUploadButton();
             });
         }
 
-        // Processing mode toggle buttons - cache for performance
-        this.batchModeBtn = document.getElementById('batchModeBtn');
-        this.individualModeBtn = document.getElementById('individualModeBtn');
-        this.modeDescription = document.getElementById('modeDescription');
+        // Processing mode toggle buttons
+        const batchModeBtn = document.getElementById('batchModeBtn');
+        const individualModeBtn = document.getElementById('individualModeBtn');
 
-        if (this.batchModeBtn) {
-            this.batchModeBtn.addEventListener('click', () => {
+        if (batchModeBtn) {
+            batchModeBtn.addEventListener('click', () => {
                 this.setProcessingMode('batch');
             });
         }
 
-        if (this.individualModeBtn) {
-            this.individualModeBtn.addEventListener('click', () => {
+        if (individualModeBtn) {
+            individualModeBtn.addEventListener('click', () => {
                 this.setProcessingMode('individual');
             });
         }
@@ -1012,14 +625,11 @@ class MemoryDashboard {
             });
         });
 
-        // Sync buttons event listeners are attached in checkSyncStatus()
-        // after buttons are confirmed to be accessible in the DOM
-
-        // Backup now button
-        const backupNowButton = document.getElementById('backupNowButton');
-        if (backupNowButton) {
-            backupNowButton.addEventListener('click', () => {
-                this.createBackup();
+        // Force sync button
+        const forceSyncButton = document.getElementById('forceSyncButton');
+        if (forceSyncButton) {
+            forceSyncButton.addEventListener('click', () => {
+                this.forceSync();
             });
         }
 
@@ -1032,7 +642,7 @@ class MemoryDashboard {
                 if (query) {
                     this.searchDocumentContent(query);
                 } else {
-                    this.showToast(this.t('toast.enterSearch', 'Please enter a search query'), 'warning');
+                    this.showToast('Please enter a search query', 'warning');
                 }
             });
 
@@ -1137,15 +747,19 @@ class MemoryDashboard {
     setProcessingMode(mode) {
         this.processingMode = mode;
 
-        // Update button states (using cached DOM elements)
-        if (this.batchModeBtn) {
-            this.batchModeBtn.classList.toggle('active', mode === 'batch');
+        // Update button states
+        const batchBtn = document.getElementById('batchModeBtn');
+        const individualBtn = document.getElementById('individualModeBtn');
+        const modeDescription = document.getElementById('modeDescription');
+
+        if (batchBtn) {
+            batchBtn.classList.toggle('active', mode === 'batch');
         }
-        if (this.individualModeBtn) {
-            this.individualModeBtn.classList.toggle('active', mode === 'individual');
+        if (individualBtn) {
+            individualBtn.classList.toggle('active', mode === 'individual');
         }
-        if (this.modeDescription) {
-            this.modeDescription.innerHTML = mode === 'batch'
+        if (modeDescription) {
+            modeDescription.innerHTML = mode === 'batch'
                 ? '<small>All selected files will be processed together with the same tags.</small>'
                 : '<small>Each file will be processed individually with the same tags.</small>';
         }
@@ -1158,14 +772,14 @@ class MemoryDashboard {
      */
     async handleDocumentUpload() {
         if (!this.selectedFiles || this.selectedFiles.length === 0) {
-            this.showToast(this.t('toast.noFiles', 'No files selected'), 'error');
+            this.showToast('No files selected', 'error');
             return;
         }
 
         const tags = document.getElementById('docTags')?.value || '';
-        const chunkSize = this.chunkSizeInput?.value || 1000;
-        const chunkOverlap = this.chunkOverlapInput?.value || 200;
-        const memoryType = this.memoryTypeInput?.value || 'document';
+        const chunkSize = document.getElementById('chunkSize')?.value || 1000;
+        const chunkOverlap = document.getElementById('chunkOverlap')?.value || 200;
+        const memoryType = document.getElementById('memoryType')?.value || 'document';
 
         try {
             this.setLoading(true);
@@ -1188,13 +802,7 @@ class MemoryDashboard {
                         }
                     } catch (error) {
                         console.error(`Failed to upload ${file.name}:`, error);
-                        this.showToast(
-                            this.t('toast.uploadFileFail', 'Failed to upload {name}: {message}', {
-                                name: file.name,
-                                message: error.message
-                            }),
-                            'error'
-                        );
+                        this.showToast(`Failed to upload ${file.name}: ${error.message}`, 'error');
                         // Continue with remaining files
                     }
                 }
@@ -1234,7 +842,7 @@ class MemoryDashboard {
 
         } catch (error) {
             console.error('Upload error:', error);
-            this.showToast(this.t('toast.uploadFailed', 'Upload failed: {message}', { message: error.message }), 'error');
+            this.showToast('Upload failed: ' + error.message, 'error');
         } finally {
             this.setLoading(false);
         }
@@ -1280,7 +888,7 @@ class MemoryDashboard {
 
         const result = await response.json();
         console.log('Upload result:', result);
-        this.showToast(this.t('toast.uploadStartedSingle', 'Upload started for {name}', { name: file.name }), 'success');
+        this.showToast(`Upload started for ${file.name}`, 'success');
 
         // Monitor progress if we have an upload ID
         if (result.upload_id) {
@@ -1314,10 +922,7 @@ class MemoryDashboard {
         }
 
         const result = await response.json();
-        this.showToast(
-            this.t('toast.uploadStartedBatch', 'Batch upload started for {count} files', { count: files.length }),
-            'success'
-        );
+        this.showToast(`Batch upload started for ${files.length} files`, 'success');
 
         // Monitor progress if we have an upload ID
         if (result.upload_id) {
@@ -1375,264 +980,69 @@ class MemoryDashboard {
      * Check hybrid backend sync status
      */
     async checkSyncStatus() {
-        // Skip UI updates during force sync to prevent periodic polling from overwriting the syncing state
-        if (this._isForceSyncing) {
-            return;
-        }
-
         try {
             const syncStatus = await this.apiCall('/sync/status');
 
-            // Get compact sync control element
-            const syncControl = document.getElementById('syncControl');
-            if (!syncControl) {
-                console.warn('Sync control element not found');
+            // Only show sync bar for hybrid mode
+            const syncBar = document.getElementById('syncStatusBar');
+            if (!syncBar) {
+                console.warn('Sync status bar element not found');
                 return;
             }
+
+            console.log('Sync status:', syncStatus);
 
             if (!syncStatus.is_hybrid) {
-                syncControl.style.display = 'none';
+                console.log('Not hybrid mode, hiding sync bar');
+                syncBar.classList.remove('visible');
                 return;
             }
 
-            // Show sync control for hybrid mode
-            syncControl.style.display = 'block';
+            // Show sync bar for hybrid mode
+            console.log('Hybrid mode detected, showing sync bar');
+            syncBar.classList.add('visible');
 
-            // Update sync status UI elements
+            // Update sync status UI
+            const statusIcon = document.getElementById('syncStatusIcon');
             const statusText = document.getElementById('syncStatusText');
-            const syncProgress = document.getElementById('syncProgress');
-            const pauseButton = document.getElementById('pauseSyncButton');
-            const resumeButton = document.getElementById('resumeSyncButton');
+            const statusDetails = document.getElementById('syncStatusDetails');
             const syncButton = document.getElementById('forceSyncButton');
 
-            // Update pause/resume button visibility based on running state
-            const isPaused = syncStatus.is_paused || !syncStatus.is_running;
-
-            // Attach event listeners if not already attached
-            if (pauseButton && !pauseButton._listenerAttached) {
-                pauseButton.addEventListener('click', () => {
-                    this.pauseSync();
-                });
-                pauseButton._listenerAttached = true;
-            }
-            if (resumeButton && !resumeButton._listenerAttached) {
-                resumeButton.addEventListener('click', () => {
-                    this.resumeSync();
-                });
-                resumeButton._listenerAttached = true;
-            }
-            if (syncButton && !syncButton._listenerAttached) {
-                syncButton.addEventListener('click', () => {
-                    this.forceSync();
-                });
-                syncButton._listenerAttached = true;
-            }
-
-            if (pauseButton) {
-                pauseButton.style.display = isPaused ? 'none' : 'flex';
-            }
-            if (resumeButton) {
-                resumeButton.style.display = isPaused ? 'flex' : 'none';
-            }
-
-            // Determine status and update UI (dot color is handled by CSS classes)
-            if (isPaused) {
-                statusText.textContent = 'Paused';
-                syncProgress.textContent = '';
-                syncControl.className = 'sync-control-compact paused';
-                if (syncButton) syncButton.disabled = true;
-            } else if (syncStatus.status === 'syncing') {
-                statusText.textContent = 'Syncing';
-                syncProgress.textContent = syncStatus.operations_pending > 0 ? `${syncStatus.operations_pending} pending` : '';
-                syncControl.className = 'sync-control-compact syncing';
-                if (syncButton) syncButton.disabled = true;
+            // Determine status and update UI
+            if (syncStatus.status === 'syncing') {
+                statusIcon.textContent = '🔄';
+                statusText.textContent = 'Syncing...';
+                statusDetails.textContent = `${syncStatus.operations_pending} operations pending`;
+                syncBar.className = 'sync-status-bar visible syncing';
+                syncButton.disabled = true;
             } else if (syncStatus.status === 'pending') {
-                statusText.textContent = 'Pending';
-                syncProgress.textContent = `${syncStatus.operations_pending} ops`;
-                syncControl.className = 'sync-control-compact pending';
-                if (syncButton) syncButton.disabled = false;
+                statusIcon.textContent = '⏱️';
+                statusText.textContent = 'Sync Pending';
+                const nextSync = Math.ceil(syncStatus.next_sync_eta_seconds);
+                statusDetails.textContent = `${syncStatus.operations_pending} operations • Next sync in ${nextSync}s`;
+                syncBar.className = 'sync-status-bar visible pending';
+                syncButton.disabled = false;
             } else if (syncStatus.status === 'error') {
-                statusText.textContent = 'Error';
-                syncProgress.textContent = `${syncStatus.operations_failed} failed`;
-                syncControl.className = 'sync-control-compact error';
-                if (syncButton) syncButton.disabled = false;
+                statusIcon.textContent = '⚠️';
+                statusText.textContent = 'Sync Error';
+                statusDetails.textContent = `${syncStatus.operations_failed} failed operations`;
+                syncBar.className = 'sync-status-bar visible error';
+                syncButton.disabled = false;
             } else {
                 // synced status
+                statusIcon.textContent = '✅';
                 statusText.textContent = 'Synced';
-                syncProgress.textContent = '';
-                syncControl.className = 'sync-control-compact synced';
-                if (syncButton) syncButton.disabled = false;
+                const lastSync = Math.floor(syncStatus.time_since_last_sync_seconds);
+                statusDetails.textContent = lastSync > 0 ? `Last sync ${lastSync}s ago` : 'Just now';
+                syncBar.className = 'sync-status-bar visible synced';
+                syncButton.disabled = false;
             }
 
         } catch (error) {
             console.error('Error checking sync status:', error);
-            // Hide sync control on error (likely not hybrid mode)
-            const syncControl = document.getElementById('syncControl');
-            if (syncControl) syncControl.style.display = 'none';
-        }
-    }
-
-    /**
-     * Format time delta in human readable format
-     */
-    formatTimeDelta(seconds) {
-        if (seconds < 60) return `${seconds}s ago`;
-        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-        return `${Math.floor(seconds / 86400)}d ago`;
-    }
-
-    /**
-     * Pause background sync
-     */
-    async pauseSync() {
-        try {
-            const result = await this.apiCall('/sync/pause', 'POST');
-            if (result.success) {
-                this.showToast(this.t('toast.syncPaused', 'Sync paused'), 'success');
-
-                // Update UI immediately using API response data
-                const pauseButton = document.getElementById('pauseSyncButton');
-                const resumeButton = document.getElementById('resumeSyncButton');
-                const statusText = document.getElementById('syncStatusText');
-                const syncControl = document.getElementById('syncControl');
-
-                if (pauseButton) pauseButton.style.display = 'none';
-                if (resumeButton) resumeButton.style.display = 'flex';
-                if (statusText) statusText.textContent = 'Paused';
-                if (syncControl) syncControl.className = 'sync-control-compact paused';
-
-                // Small delay to allow backend state to propagate before checking status
-                await new Promise(resolve => setTimeout(resolve, 200));
-            } else {
-                this.showToast(
-                    this.t('toast.syncPauseFailWithReason', 'Failed to pause sync: {reason}', { reason: result.message }),
-                    'error'
-                );
-            }
-            await this.checkSyncStatus();
-        } catch (error) {
-            console.error('Error pausing sync:', error);
-            this.showToast(this.t('toast.syncPauseFail', 'Failed to pause sync'), 'error');
-        }
-    }
-
-    /**
-     * Resume background sync
-     */
-    async resumeSync() {
-        try {
-            const result = await this.apiCall('/sync/resume', 'POST');
-            if (result.success) {
-                this.showToast(this.t('toast.syncResumed', 'Sync resumed'), 'success');
-
-                // Update UI immediately using API response data
-                const pauseButton = document.getElementById('pauseSyncButton');
-                const resumeButton = document.getElementById('resumeSyncButton');
-                const statusText = document.getElementById('syncStatusText');
-                const syncControl = document.getElementById('syncControl');
-
-                if (pauseButton) pauseButton.style.display = 'flex';
-                if (resumeButton) resumeButton.style.display = 'none';
-                if (statusText) statusText.textContent = 'Synced';
-                if (syncControl) syncControl.className = 'sync-control-compact synced';
-
-                // Small delay to allow backend state to propagate before checking status
-                await new Promise(resolve => setTimeout(resolve, 200));
-            } else {
-                this.showToast(
-                    this.t('toast.syncResumeFailWithReason', 'Failed to resume sync: {reason}', { reason: result.message }),
-                    'error'
-                );
-            }
-            await this.checkSyncStatus();
-        } catch (error) {
-            console.error('Error resuming sync:', error);
-            this.showToast(this.t('toast.syncResumeFail', 'Failed to resume sync'), 'error');
-        }
-    }
-
-    /**
-     * Check backup status and update Settings modal
-     */
-    async checkBackupStatus() {
-        try {
-            const backupStatus = await this.apiCall('/backup/status');
-
-            // Update backup elements in Settings modal
-            const lastBackup = document.getElementById('settingsLastBackup');
-            const backupCount = document.getElementById('settingsBackupCount');
-            const nextBackup = document.getElementById('settingsNextBackup');
-
-            if (!backupStatus.enabled) {
-                if (lastBackup) lastBackup.textContent = 'Backups disabled';
-                if (backupCount) backupCount.textContent = '-';
-                if (nextBackup) nextBackup.textContent = '-';
-                return;
-            }
-
-            // Update last backup time
-            if (lastBackup) {
-                if (backupStatus.time_since_last_seconds) {
-                    lastBackup.textContent = this.formatTimeDelta(Math.floor(backupStatus.time_since_last_seconds)) + ' ago';
-                } else {
-                    lastBackup.textContent = 'Never';
-                }
-            }
-
-            // Update backup count with size
-            if (backupCount) {
-                const sizeMB = (backupStatus.total_size_bytes / 1024 / 1024).toFixed(1);
-                backupCount.textContent = `${backupStatus.backup_count} (${sizeMB} MB)`;
-            }
-
-            // Update next scheduled backup
-            if (nextBackup && backupStatus.next_backup_at) {
-                const nextDate = new Date(backupStatus.next_backup_at);
-                nextBackup.textContent = nextDate.toLocaleString();
-            } else if (nextBackup) {
-                nextBackup.textContent = backupStatus.scheduler_running ? 'Scheduled' : 'Not scheduled';
-            }
-
-        } catch (error) {
-            console.error('Error checking backup status:', error);
-        }
-    }
-
-    /**
-     * Create a backup manually
-     */
-    async createBackup() {
-        const backupButton = document.getElementById('backupNowButton');
-        if (backupButton) backupButton.disabled = true;
-
-        try {
-            this.showToast(this.t('toast.backupCreating', 'Creating backup...'), 'info');
-            const result = await this.apiCall('/backup/now', 'POST');
-
-            if (result.success) {
-                const sizeMB = (result.size_bytes / 1024 / 1024).toFixed(2);
-                this.showToast(
-                    this.t('toast.backupCreated', 'Backup created: {name} ({size} MB)', {
-                        name: result.filename,
-                        size: sizeMB
-                    }),
-                    'success'
-                );
-            } else {
-                this.showToast(
-                    this.t('toast.backupFailedWithReason', 'Backup failed: {reason}', { reason: result.error }),
-                    'error'
-                );
-            }
-
-            await this.checkBackupStatus();
-
-        } catch (error) {
-            console.error('Error creating backup:', error);
-            this.showToast(this.t('toast.backupFailed', 'Failed to create backup'), 'error');
-        } finally {
-            if (backupButton) backupButton.disabled = false;
+            // Hide sync bar on error (likely not hybrid mode)
+            const syncBar = document.getElementById('syncStatusBar');
+            if (syncBar) syncBar.style.display = 'none';
         }
     }
 
@@ -1654,66 +1064,27 @@ class MemoryDashboard {
         const originalText = syncButton.innerHTML;
 
         try {
-            // Check if sync was paused before force sync
-            const statusBefore = await this.apiCall('/sync/status');
-            const wasPaused = statusBefore.is_paused;
-
-            // Set flag to prevent periodic polling from overwriting UI during force sync
-            this._isForceSyncing = true;
-
-            // Disable button and show loading state (just egg timer, no text - widget shows "Syncing")
+            // Disable button and show loading state
             syncButton.disabled = true;
-            syncButton.innerHTML = '<span class="sync-button-icon">⏳</span>';
-
-            // IMMEDIATELY update sync control widget to show syncing state
-            const statusText = document.getElementById('syncStatusText');
-            const syncProgress = document.getElementById('syncProgress');
-            const syncControl = document.getElementById('syncControl');
-
-            if (statusText) statusText.textContent = 'Syncing';
-            if (syncProgress) syncProgress.textContent = statusBefore.operations_pending > 0 ? `${statusBefore.operations_pending} pending` : '';
-            if (syncControl) syncControl.className = 'sync-control-compact syncing';
-
-            // Show toast when sync starts
-            this.showToast(this.t('toast.syncStarting', 'Starting sync...'), 'info');
+            syncButton.innerHTML = '<span class="sync-button-icon">⏳</span><span class="sync-button-text">Syncing...</span>';
 
             const result = await this.apiCall('/sync/force', 'POST');
 
             if (result.success) {
-                this.showToast(
-                    this.t('toast.syncCompleted', 'Synced {count} operations in {seconds}s', {
-                        count: result.operations_synced,
-                        seconds: result.time_taken_seconds
-                    }),
-                    'success'
-                );
+                this.showToast(`Synced ${result.operations_synced} operations in ${result.time_taken_seconds}s`, 'success');
 
                 // Refresh dashboard data to show newly synced memories
                 if (this.currentView === 'dashboard') {
                     await this.loadDashboardData();
                 }
-
-                // If sync was paused before, pause it again after force sync
-                if (wasPaused) {
-                    await this.apiCall('/sync/pause', 'POST');
-                }
             } else {
-                this.showToast(
-                    this.t('toast.syncFailedWithReason', 'Sync failed: {reason}', { reason: result.message }),
-                    'error'
-                );
+                this.showToast('Sync failed: ' + result.message, 'error');
             }
 
         } catch (error) {
             console.error('Error forcing sync:', error);
-            this.showToast(
-                this.t('toast.syncForceFailed', 'Failed to force sync: {reason}', { reason: error.message }),
-                'error'
-            );
+            this.showToast('Failed to force sync: ' + error.message, 'error');
         } finally {
-            // Clear flag to allow periodic polling to resume
-            this._isForceSyncing = false;
-
             // Re-enable button
             syncButton.disabled = false;
             syncButton.innerHTML = originalText;
@@ -1778,7 +1149,7 @@ class MemoryDashboard {
             clearBtn.onclick = () => this.clearTagFilter();
         } catch (error) {
             console.error('Error filtering by tag:', error);
-            this.showToast(this.t('toast.loadTagFail', 'Failed to load memories for tag'), 'error');
+            this.showToast('Failed to load memories for tag', 'error');
         }
     }
 
@@ -1797,33 +1168,6 @@ class MemoryDashboard {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
-    }
-
-    /**
-     * Get time-of-day emoji icon based on timestamp
-     * @param {number} timestamp - Unix timestamp in seconds
-     * @returns {string} HTML with emoji + tooltip
-     */
-    renderTimeIcon(timestamp) {
-        if (!timestamp) return '';
-
-        const date = new Date(timestamp * 1000);
-        const hour = date.getHours(); // Local timezone
-        const segment = Math.floor(hour / 3); // 0-7
-
-        const icons = ['🌙', '🌅', '☕', '💻', '🍽️', '⛅', '🍷', '🛏️'];
-        const labels = [
-            'Late Night',    // 00-03
-            'Early Morning', // 03-06
-            'Morning',       // 06-09
-            'Late Morning',  // 09-12
-            'Afternoon',     // 12-15
-            'Late Afternoon',// 15-18
-            'Evening',       // 18-21
-            'Night'          // 21-24
-        ];
-
-        return `<span class="time-icon" title="${labels[segment]}">${icons[segment]}</span>`;
     }
 
     /**
@@ -1968,9 +1312,6 @@ class MemoryDashboard {
             case 'analytics':
                 await this.loadAnalyticsData();
                 break;
-            case 'qualityAnalytics':
-                await this.loadQualityAnalytics();
-                break;
             case 'apiDocs':
                 // API docs view - static content, no additional loading needed
                 break;
@@ -2011,7 +1352,7 @@ class MemoryDashboard {
             this.updateResultsCount(results.length);
         } catch (error) {
             console.error('Search error:', error);
-            this.showToast(this.t('toast.searchFailed', 'Search failed'), 'error');
+            this.showToast('Search failed', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -2153,7 +1494,7 @@ class MemoryDashboard {
 
         } catch (error) {
             console.error('Filter search error:', error);
-            this.showToast(this.t('toast.filterSearchFailed', 'Filter search failed'), 'error');
+            this.showToast('Filter search failed', 'error');
         } finally {
             // Remove loading state
             const applyBtn = document.getElementById('applyFiltersBtn');
@@ -2242,7 +1583,7 @@ class MemoryDashboard {
         const type = document.getElementById('memoryType').value;
 
         if (!content) {
-            this.showToast(this.t('toast.enterMemoryContent', 'Please enter memory content'), 'warning');
+            this.showToast('Please enter memory content', 'warning');
             return;
         }
 
@@ -2294,10 +1635,7 @@ class MemoryDashboard {
                                 const deleteResponse = await this.apiCall(`/memories/${originalContentHash}`, 'DELETE');
                             } catch (deleteError) {
                                 console.error('Failed to delete original memory after creating new version:', deleteError);
-                                this.showToast(
-                                    this.t('toast.duplicateMemoryWarning', 'Memory updated, but original version still exists. You may need to manually delete the duplicate.'),
-                                    'warning'
-                                );
+                                this.showToast('Memory updated, but original version still exists. You may need to manually delete the duplicate.', 'warning');
                             }
                         } else {
                             // Creation failed - do NOT delete original memory
@@ -2338,10 +1676,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Error saving memory:', error);
-            this.showToast(
-                this.t('toast.saveMemoryFailed', 'Failed to save memory: {reason}', { reason: error.message }),
-                'error'
-            );
+            this.showToast(error.message || 'Failed to save memory', 'error');
         }
     }
 
@@ -2381,7 +1716,7 @@ class MemoryDashboard {
         return `
             <div class="memory-detail">
                 <div class="memory-meta">
-                    <p><strong>Created:</strong> ${createdDate} ${this.renderTimeIcon(memory.created_at)}</p>
+                    <p><strong>Created:</strong> ${createdDate}</p>
                     ${updatedDate ? `<p><strong>Updated:</strong> ${updatedDate}</p>` : ''}
                     <p><strong>Type:</strong> ${memory.memory_type || 'note'}</p>
                     <p><strong>ID:</strong> ${memory.content_hash}</p>
@@ -2465,7 +1800,7 @@ class MemoryDashboard {
         try {
             await this.apiCall(`/memories/${memory.content_hash}`, 'DELETE');
             this.closeModal(document.getElementById('memoryModal'));
-            this.showToast(this.t('toast.memoryDeletedSuccess', 'Memory deleted successfully'), 'success');
+            this.showToast('Memory deleted successfully', 'success');
 
             // Refresh current view
             if (this.currentView === 'dashboard') {
@@ -2479,7 +1814,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Error deleting memory:', error);
-            this.showToast(this.t('toast.memoryDeleteFailed', 'Failed to delete memory'), 'error');
+            this.showToast('Failed to delete memory', 'error');
         }
     }
 
@@ -2555,10 +1890,10 @@ class MemoryDashboard {
         const shareText = `Memory Content:\n${shareData.content}\n\nTags: ${shareData.tags.join(', ')}\nType: ${shareData.type}\nCreated: ${shareData.created}`;
 
         navigator.clipboard.writeText(shareText).then(() => {
-            this.showToast(this.t('toast.copySuccess', 'Memory copied to clipboard'), 'success');
+            this.showToast('Memory copied to clipboard', 'success');
         }).catch(err => {
             console.error('Could not copy text: ', err);
-            this.showToast(this.t('toast.copyFailed', 'Failed to copy to clipboard'), 'error');
+            this.showToast('Failed to copy to clipboard', 'error');
         });
     }
 
@@ -2567,7 +1902,7 @@ class MemoryDashboard {
      */
     async handleExportData() {
         try {
-        this.showToast(this.t('toast.exportPreparing', 'Preparing export...'), 'info');
+            this.showToast('Preparing export...', 'info');
 
             // Fetch all memories using pagination
             const allMemories = [];
@@ -2589,13 +1924,7 @@ class MemoryDashboard {
                     page++;
 
                     // Update progress
-                    this.showToast(
-                        this.t('toast.exportFetching', 'Fetching memories... ({current}/{total})', {
-                            current: allMemories.length,
-                            total: totalMemories
-                        }),
-                        'info'
-                    );
+                    this.showToast(`Fetching memories... (${allMemories.length}/${totalMemories})`, 'info');
                 } else {
                     hasMore = false;
                 }
@@ -2618,13 +1947,10 @@ class MemoryDashboard {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            this.showToast(
-                this.t('toast.exportSuccess', 'Successfully exported {count} memories', { count: allMemories.length }),
-                'success'
-            );
+            this.showToast(`Successfully exported ${allMemories.length} memories`, 'success');
         } catch (error) {
             console.error('Export error:', error);
-            this.showToast(this.t('toast.exportFailed', 'Failed to export data'), 'error');
+            this.showToast('Failed to export data', 'error');
         }
     }
 
@@ -2785,7 +2111,7 @@ class MemoryDashboard {
                     <div class="document-info">
                         <div class="document-title">${fileName}</div>
                         <div class="document-meta">
-                            ${chunkCount} chunks • ${createdDate} ${this.renderTimeIcon(group.created_at)}
+                            ${chunkCount} chunks • ${createdDate}
                         </div>
                     </div>
                 </div>
@@ -2945,10 +2271,9 @@ class MemoryDashboard {
 
     return `
     <div class="memory-card" data-memory-id="${memory.content_hash}">
-        ${this.renderQualityBadge(memory)}
     <div class="memory-header">
         <div class="memory-meta">
-                        <span>${createdDate} ${this.renderTimeIcon(memory.created_at)}</span>
+                        <span>${createdDate}</span>
             ${memory.memory_type ? `<span> • ${memory.memory_type}</span>` : ''}
         ${relevanceScore ? `<span> • ${relevanceScore}% match</span>` : ''}
         </div>
@@ -3127,7 +2452,7 @@ class MemoryDashboard {
         this.updateResultsCount(0);
         this.updateActiveFilters();
 
-        this.showToast(this.t('toast.filtersCleared', 'All filters cleared'), 'info');
+        this.showToast('All filters cleared', 'info');
     }
 
     /**
@@ -3137,16 +2462,12 @@ class MemoryDashboard {
         this.liveSearchEnabled = event.target.checked;
         const modeText = document.getElementById('searchModeText');
         if (modeText) {
-            modeText.textContent = this.liveSearchEnabled
-                ? this.t('search.modeLive', 'Live Search')
-                : this.t('search.modeManual', 'Manual Search');
+            modeText.textContent = this.liveSearchEnabled ? 'Live Search' : 'Manual Search';
         }
 
         // Show a toast to indicate the mode change
         this.showToast(
-            this.liveSearchEnabled
-                ? this.t('toast.searchModeLive', 'Search mode: Live (searches as you type)')
-                : this.t('toast.searchModeManual', 'Search mode: Manual (click Search button)'),
+            `Search mode: ${this.liveSearchEnabled ? 'Live (searches as you type)' : 'Manual (click Search button)'}`,
             'info'
         );
     }
@@ -3343,19 +2664,14 @@ class MemoryDashboard {
                 modal.style.display = 'flex';
 
                 if (response.status === 'partial') {
-                    this.showToast(
-                        this.t('toast.documentChunksPartial', 'Found {count} chunks (partial results)', {
-                            count: response.total_found
-                        }),
-                        'warning'
-                    );
+                    this.showToast(`Found ${response.total_found} chunks (partial results)`, 'warning');
                 }
             } else {
-                this.showToast(this.t('toast.loadDocumentMemoriesFail', 'Failed to load document memories'), 'error');
+                this.showToast('Failed to load document memories', 'error');
             }
         } catch (error) {
             console.error('Error viewing document memory:', error);
-            this.showToast(this.t('toast.errorLoadingDocumentMemories', 'Error loading document memories'), 'error');
+            this.showToast('Error loading document memories', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3391,13 +2707,7 @@ class MemoryDashboard {
             console.log('Delete response:', response);
 
             if (response.status === 'success') {
-                this.showToast(
-                    this.t('toast.documentRemoved', 'Removed "{name}" ({count} memories deleted)', {
-                        name: filename,
-                        count: response.memories_deleted
-                    }),
-                    'success'
-                );
+                this.showToast(`Removed "${filename}" (${response.memories_deleted} memories deleted)`, 'success');
                 // Refresh the current view (Dashboard or Documents tab)
                 console.log('Refreshing view:', this.currentView);
                 if (this.currentView === 'dashboard') {
@@ -3407,12 +2717,12 @@ class MemoryDashboard {
                 }
             } else {
                 console.error('Removal failed with response:', response);
-                this.showToast(this.t('toast.removeDocumentFailed', 'Failed to remove document'), 'error');
+                this.showToast('Failed to remove document', 'error');
             }
         } catch (error) {
             console.error('Error removing document:', error);
             console.error('Error stack:', error.stack);
-            this.showToast(this.t('toast.errorRemovingDocument', 'Error removing document'), 'error');
+            this.showToast('Error removing document', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3444,12 +2754,7 @@ class MemoryDashboard {
                 // Limit display to top 20 most relevant document results
                 const displayResults = documentResults.slice(0, 20);
 
-                const count = documentResults.length;
-                const extra = count > 20 ? ' (showing top 20)' : '';
-                const key = count === 1 ? 'documents.search.count.one' : 'documents.search.count.other';
-                const fallback = count === 1 ? '{count} result{extra}' : '{count} results{extra}';
-                const baseCount = this.t(key, fallback, { count, extra });
-                resultsCount.textContent = baseCount;
+                resultsCount.textContent = `${documentResults.length} result${documentResults.length !== 1 ? 's' : ''}${documentResults.length > 20 ? ' (showing top 20)' : ''}`;
 
                 if (displayResults.length > 0) {
                     const resultsHtml = displayResults.map(result => {
@@ -3476,16 +2781,16 @@ class MemoryDashboard {
 
                     resultsList.innerHTML = resultsHtml;
                 } else {
-                    resultsList.innerHTML = `<p class="text-muted">${this.t('documents.search.noMatch', 'No matching document content found. Try different search terms.')}</p>`;
+                    resultsList.innerHTML = '<p class="text-muted">No matching document content found. Try different search terms.</p>';
                 }
 
                 resultsContainer.style.display = 'block';
             } else {
-                this.showToast(this.t('toast.searchFailed', 'Search failed'), 'error');
+                this.showToast('Search failed', 'error');
             }
         } catch (error) {
             console.error('Error searching documents:', error);
-            this.showToast(this.t('toast.errorPerformingSearch', 'Error performing search'), 'error');
+            this.showToast('Error performing search', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3550,10 +2855,7 @@ class MemoryDashboard {
             localStorage.setItem('memoryDashboardSettings', JSON.stringify(this.settings));
         } catch (error) {
             console.error('Failed to save settings:', error);
-            this.showToast(
-                this.t('toast.saveSettingsFailed', 'Failed to save settings. Your preferences will not be persisted.'),
-                'error'
-            );
+            this.showToast('Failed to save settings. Your preferences will not be persisted.', 'error');
         }
     }
 
@@ -3563,43 +2865,6 @@ class MemoryDashboard {
     applyTheme(theme = this.settings.theme) {
         const isDark = theme === 'dark';
         document.body.classList.toggle('dark-mode', isDark);
-
-        // Configure Chart.js colors for dark mode
-        if (typeof Chart !== 'undefined' && Chart.defaults) {
-            // Set global defaults for text and borders
-            if (Chart.defaults.color !== undefined) {
-                Chart.defaults.color = isDark ? '#f9fafb' : '#374151';
-            }
-            if (Chart.defaults.borderColor !== undefined) {
-                Chart.defaults.borderColor = isDark ? '#4b5563' : '#e5e7eb';
-            }
-
-            // Redraw existing charts if Quality tab is visible
-            if (this.qualityDistributionChart) {
-                this.qualityDistributionChart.options.scales.y.ticks = {
-                    ...this.qualityDistributionChart.options.scales.y.ticks,
-                    color: isDark ? '#f9fafb' : '#374151'
-                };
-                this.qualityDistributionChart.options.scales.y.grid = {
-                    ...this.qualityDistributionChart.options.scales.y.grid,
-                    color: isDark ? '#374151' : '#e5e7eb'
-                };
-                this.qualityDistributionChart.options.scales.x = {
-                    ...this.qualityDistributionChart.options.scales.x,
-                    ticks: { color: isDark ? '#f9fafb' : '#374151' },
-                    grid: { color: isDark ? '#374151' : '#e5e7eb' }
-                };
-                this.qualityDistributionChart.update();
-            }
-
-            if (this.qualityProviderChart) {
-                this.qualityProviderChart.options.plugins.legend.labels = {
-                    ...this.qualityProviderChart.options.plugins.legend.labels,
-                    color: isDark ? '#f9fafb' : '#374151'
-                };
-                this.qualityProviderChart.update();
-            }
-        }
 
         // Toggle icon visibility using CSS classes
         const sunIcon = document.getElementById('sunIcon');
@@ -3618,10 +2883,7 @@ class MemoryDashboard {
         this.settings.theme = newTheme;
         this.applyTheme(newTheme);
         this.saveSettingsToStorage();
-        this.showToast(
-            this.t('toast.themeSwitched', 'Switched to {theme} mode', { theme: newTheme }),
-            'success'
-        );
+        this.showToast(`Switched to ${newTheme} mode`, 'success');
     }
 
     /**
@@ -3638,11 +2900,8 @@ class MemoryDashboard {
         // Reset system info to loading state
         this.resetSystemInfoLoadingState();
 
-        // Load system information and backup status
-        await Promise.all([
-            this.loadSystemInfo(),
-            this.checkBackupStatus()
-        ]);
+        // Load system information
+        await this.loadSystemInfo();
 
         this.openModal(modal);
     }
@@ -3759,7 +3018,7 @@ class MemoryDashboard {
 
         // Close modal and show confirmation
         this.closeModal(document.getElementById('settingsModal'));
-        this.showToast(this.t('toast.settingsSaved', 'Settings saved successfully'), 'success');
+        this.showToast('Settings saved successfully', 'success');
     }
 
     // ===== MANAGE TAB METHODS =====
@@ -3774,7 +3033,7 @@ class MemoryDashboard {
             await this.loadTagManagementStats();
         } catch (error) {
             console.error('Failed to load manage data:', error);
-            this.showToast(this.t('toast.loadManageFail', 'Failed to load management data'), 'error');
+            this.showToast('Failed to load management data', 'error');
         }
     }
 
@@ -3879,7 +3138,7 @@ class MemoryDashboard {
         const tag = select.value;
 
         if (!tag) {
-            this.showToast(this.t('toast.selectTagToDelete', 'Please select a tag to delete'), 'warning');
+            this.showToast('Please select a tag to delete', 'warning');
             return;
         }
 
@@ -3912,7 +3171,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Bulk delete failed:', error);
-            this.showToast(this.t('toast.bulkDeleteFailed', 'Bulk delete operation failed'), 'error');
+            this.showToast('Bulk delete operation failed', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3942,7 +3201,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Cleanup duplicates failed:', error);
-            this.showToast(this.t('toast.cleanupFailed', 'Cleanup operation failed'), 'error');
+            this.showToast('Cleanup operation failed', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3956,7 +3215,7 @@ class MemoryDashboard {
         const date = dateInput.value;
 
         if (!date) {
-            this.showToast(this.t('toast.selectDate', 'Please select a date'), 'warning');
+            this.showToast('Please select a date', 'warning');
             return;
         }
 
@@ -3984,7 +3243,7 @@ class MemoryDashboard {
             }
         } catch (error) {
             console.error('Bulk delete by date failed:', error);
-            this.showToast(this.t('toast.bulkDeleteFailed', 'Bulk delete operation failed'), 'error');
+            this.showToast('Bulk delete operation failed', 'error');
         } finally {
             this.setLoading(false);
         }
@@ -3994,14 +3253,14 @@ class MemoryDashboard {
      * Handle database optimization
      */
     async handleOptimizeDatabase() {
-        this.showToast(this.t('toast.dbOptimizeTodo', 'Database optimization not yet implemented'), 'warning');
+        this.showToast('Database optimization not yet implemented', 'warning');
     }
 
     /**
      * Handle index rebuild
      */
     async handleRebuildIndex() {
-        this.showToast(this.t('toast.indexRebuildTodo', 'Index rebuild not yet implemented'), 'warning');
+        this.showToast('Index rebuild not yet implemented', 'warning');
     }
 
     /**
@@ -4011,7 +3270,7 @@ class MemoryDashboard {
         const newTag = prompt(`Rename tag "${oldTag}" to:`, oldTag);
         if (!newTag || newTag === oldTag) return;
 
-        this.showToast(this.t('toast.tagRenameTodo', 'Tag renaming not yet implemented'), 'warning');
+        this.showToast('Tag renaming not yet implemented', 'warning');
     }
 
     /**
@@ -4022,7 +3281,7 @@ class MemoryDashboard {
             return;
         }
 
-        this.showToast(this.t('toast.tagDeleteTodo', 'Tag deletion not yet implemented'), 'warning');
+        this.showToast('Tag deletion not yet implemented', 'warning');
     }
 
     // ===== ANALYTICS TAB METHODS =====
@@ -4044,7 +3303,7 @@ class MemoryDashboard {
             ]);
         } catch (error) {
             console.error('Failed to load analytics data:', error);
-            this.showToast(this.t('toast.loadAnalyticsFail', 'Failed to load analytics data'), 'error');
+            this.showToast('Failed to load analytics data', 'error');
         }
     }
 
@@ -4099,24 +3358,16 @@ class MemoryDashboard {
             return;
         }
 
-        // Find max count for scaling
-        const recentPoints = data.data_points.slice(-10);
-        const maxCount = Math.max(...recentPoints.map(p => p.count), 1);
-
+        // Simple text-based chart for now (could be enhanced with a charting library)
         let html = '<div class="simple-chart">';
+        html += '<div class="chart-header">Daily Memory Growth</div>';
 
-        recentPoints.forEach(point => {
-            // Normalize bar width relative to max, then convert to pixels (200px scale)
-            const barWidthPx = (point.count / maxCount) * 200;
-            const displayCount = point.count || 0;
-            const displayCumulative = point.cumulative || 0;
-            // Use label if available, otherwise fall back to date for backward compatibility
-            const displayLabel = point.label || point.date;
-
+        data.data_points.slice(-10).forEach(point => { // Show last 10 days
+            const barWidth = Math.max(point.count * 5, 1); // Scale bars
             html += `<div class="chart-row">
-                <div class="chart-bar" style="width: ${barWidthPx}px"></div>
-                <span class="chart-value">+${displayCount} <small>(${displayCumulative} total)</small></span>
-                <span class="chart-label">${displayLabel}</span>
+                <span class="chart-label">${point.date}</span>
+                <div class="chart-bar" style="width: ${barWidth}px"></div>
+                <span class="chart-value">${point.count}</span>
             </div>`;
         });
 
@@ -4152,33 +3403,17 @@ class MemoryDashboard {
             return;
         }
 
-        // Filter tags with >10 memories, aggregate the rest
-        const significantTags = data.tags.filter(t => t.count > 10);
-        const minorTags = data.tags.filter(t => t.count <= 10);
-
         let html = '<div class="simple-chart">';
+        html += '<div class="chart-header">Tag Usage Distribution</div>';
 
-        // Render significant tags
-        significantTags.forEach(tag => {
-            const barWidthPx = (tag.percentage / 100) * 200; // Convert percentage to pixels (200px scale)
+        data.tags.slice(0, 10).forEach(tag => { // Top 10 tags
+            const barWidth = Math.max(tag.percentage * 3, 1); // Scale bars
             html += `<div class="chart-row">
-                <div class="chart-bar" style="width: ${barWidthPx}px"></div>
-                <span class="chart-value">${tag.count} (${tag.percentage}%)</span>
                 <span class="chart-label">${tag.tag}</span>
+                <div class="chart-bar" style="width: ${barWidth}px"></div>
+                <span class="chart-value">${tag.count} (${tag.percentage}%)</span>
             </div>`;
         });
-
-        // Add "diverse" category if there are minor tags
-        if (minorTags.length > 0) {
-            const diverseCount = minorTags.reduce((sum, t) => sum + t.count, 0);
-            const diversePercentage = minorTags.reduce((sum, t) => sum + t.percentage, 0);
-            const barWidthPx = (diversePercentage / 100) * 200;
-            html += `<div class="chart-row">
-                <div class="chart-bar" style="width: ${barWidthPx}px"></div>
-                <span class="chart-value">${diverseCount} (${diversePercentage.toFixed(1)}%)</span>
-                <span class="chart-label" title="${minorTags.length} tags with ≤10 memories each">diverse (${minorTags.length} tags)</span>
-            </div>`;
-        }
 
         html += '</div>';
         container.innerHTML = html;
@@ -4212,34 +3447,17 @@ class MemoryDashboard {
             return;
         }
 
-        // Filter types with >10 memories, aggregate the rest
-        const significantTypes = data.types.filter(t => t.count > 10);
-        const minorTypes = data.types.filter(t => t.count <= 10);
-
         let html = '<div class="simple-chart">';
+        html += '<div class="chart-header">Memory Types</div>';
 
-        // Render significant types
-        significantTypes.forEach(type => {
-            const barWidthPx = (type.percentage / 100) * 200; // Convert percentage to pixels (200px scale)
-            const typeName = type.memory_type || 'untyped';
+        data.types.forEach(type => {
+            const barWidth = Math.max(type.percentage * 3, 1); // Scale bars
             html += `<div class="chart-row">
-                <div class="chart-bar" style="width: ${barWidthPx}px"></div>
-                <span class="chart-value">${type.count} (${type.percentage.toFixed(1)}%)</span>
-                <span class="chart-label" title="${typeName}">${typeName}</span>
+                <span class="chart-label">${type.memory_type || 'untyped'}</span>
+                <div class="chart-bar" style="width: ${barWidth}px"></div>
+                <span class="chart-value">${type.count} (${type.percentage}%)</span>
             </div>`;
         });
-
-        // Add "diverse" category if there are minor types
-        if (minorTypes.length > 0) {
-            const diverseCount = minorTypes.reduce((sum, t) => sum + t.count, 0);
-            const diversePercentage = minorTypes.reduce((sum, t) => sum + t.percentage, 0);
-            const barWidthPx = (diversePercentage / 100) * 200;
-            html += `<div class="chart-row">
-                <div class="chart-bar" style="width: ${barWidthPx}px"></div>
-                <span class="chart-value">${diverseCount} (${diversePercentage.toFixed(1)}%)</span>
-                <span class="chart-label" title="${minorTypes.length} types with ≤10 memories each">diverse (${minorTypes.length} types)</span>
-            </div>`;
-        }
 
         html += '</div>';
         container.innerHTML = html;
@@ -4340,21 +3558,14 @@ class MemoryDashboard {
         // Activity breakdown chart
         if (data.breakdown && data.breakdown.length > 0) {
             html += '<div class="activity-chart">';
-            // Calculate total count for percentage-based distribution
-            const totalCount = data.breakdown.reduce((sum, d) => sum + d.count, 0);
             const maxCount = Math.max(...data.breakdown.map(d => d.count));
 
             data.breakdown.forEach(item => {
-                // Show percentage of total activity, with minimum width for visibility
-                const percentage = totalCount > 0 ? (item.count / totalCount * 100) : 0;
-                // Use percentage for bar width, but scale up for better visualization
-                // Use max count for scaling to ensure largest bar reaches reasonable width
-                const barWidth = totalCount > 0 ? (item.count / maxCount * 100) : 0;
-
+                const barWidth = maxCount > 0 ? (item.count / maxCount * 100) : 0;
                 html += `<div class="activity-bar-row">
                     <span class="activity-label">${item.label}</span>
-                    <div class="activity-bar" style="width: ${barWidth}%" title="${item.count} memories (${percentage.toFixed(1)}%)"></div>
-                    <span class="activity-count">${item.count} (${percentage.toFixed(1)}%)</span>
+                    <div class="activity-bar" style="width: ${barWidth}%" title="${item.count} memories"></div>
+                    <span class="activity-count">${item.count}</span>
                 </div>`;
             });
 
@@ -4514,13 +3725,10 @@ class MemoryDashboard {
             html += '<h4>Largest Memories</h4>';
             html += '<ul class="largest-memories">';
             data.largest_memories.slice(0, 5).forEach(memory => {
-                // Backend provides created_at as ISO string, not timestamp
-                const date = memory.created_at ? new Date(memory.created_at).toLocaleDateString() : 'Unknown';
-                // Backend provides size_kb and preview (not size and content_preview)
-                const sizeDisplay = memory.size_kb ? `${memory.size_kb} KB` : `${memory.size_bytes || 0} bytes`;
+                const date = memory.created_at ? new Date(memory.created_at * 1000).toLocaleDateString() : 'Unknown';
                 html += `<li>
-                    <div class="memory-size">${sizeDisplay}</div>
-                    <div class="memory-preview">${this.escapeHtml(memory.preview || '')}</div>
+                    <div class="memory-size">${memory.size} chars</div>
+                    <div class="memory-preview">${this.escapeHtml(memory.content_preview)}</div>
                     <div class="memory-meta">${date} • Tags: ${memory.tags.join(', ') || 'none'}</div>
                 </li>`;
             });
@@ -4536,279 +3744,6 @@ class MemoryDashboard {
      */
     async handleGrowthPeriodChange() {
         await this.loadMemoryGrowthChart();
-    }
-
-    // ===== QUALITY ANALYTICS METHODS =====
-
-    /**
-     * Load quality analytics dashboard
-     */
-    async loadQualityAnalytics() {
-        try {
-            const response = await fetch(`${this.apiBase}/quality/distribution`);
-            if (!response.ok) throw new Error('Failed to load quality analytics');
-
-            const data = await response.json();
-
-            // Update summary stats
-            this.updateElementText('quality-total-memories', data.total_memories.toLocaleString());
-            this.updateElementText('quality-high-count', data.high_quality_count.toLocaleString());
-            this.updateElementText('quality-medium-count', data.medium_quality_count.toLocaleString());
-            this.updateElementText('quality-low-count', data.low_quality_count.toLocaleString());
-            this.updateElementText('quality-average-score', data.average_score.toFixed(2));
-
-            // Render charts
-            this.renderQualityDistributionChart(data);
-            this.renderQualityProviderChart(data.provider_breakdown);
-
-            // Render top/bottom memories
-            this.renderTopQualityMemories(data.top_memories);
-            this.renderBottomQualityMemories(data.bottom_memories);
-
-        } catch (error) {
-            console.error('Failed to load quality analytics:', error);
-            this.showToast('Failed to load quality analytics', 'error');
-        }
-    }
-
-    /**
-     * Render quality distribution bar chart
-     */
-    renderQualityDistributionChart(data) {
-        const canvas = document.getElementById('quality-distribution-chart');
-        if (!canvas) return;
-
-        // Destroy existing chart if present
-        if (this.qualityDistributionChart) {
-            this.qualityDistributionChart.destroy();
-        }
-
-        const ctx = canvas.getContext('2d');
-        const isDark = document.body.classList.contains('dark-mode');
-        const textColor = isDark ? '#f9fafb' : '#374151';
-        const gridColor = isDark ? '#374151' : '#e5e7eb';
-
-        this.qualityDistributionChart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: ['Low (<0.5)', 'Medium (0.5-0.7)', 'High (≥0.7)'],
-                datasets: [{
-                    label: 'Number of Memories',
-                    data: [
-                        data.low_quality_count,
-                        data.medium_quality_count,
-                        data.high_quality_count
-                    ],
-                    backgroundColor: [
-                        '#F8D7DA',  // Low
-                        '#FFF3CD',  // Medium
-                        '#D4EDDA'   // High
-                    ],
-                    borderColor: [
-                        '#F5C6CB',
-                        '#FFEAA7',
-                        '#C3E6CB'
-                    ],
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: {
-                            display: true,
-                            text: 'Count',
-                            color: textColor
-                        },
-                        ticks: {
-                            color: textColor
-                        },
-                        grid: {
-                            color: gridColor
-                        }
-                    },
-                    x: {
-                        ticks: {
-                            color: textColor
-                        },
-                        grid: {
-                            color: gridColor
-                        }
-                    }
-                },
-                plugins: {
-                    legend: {
-                        display: false
-                    }
-                }
-            }
-        });
-    }
-
-    /**
-     * Render quality provider pie chart
-     */
-    renderQualityProviderChart(providerData) {
-        const canvas = document.getElementById('quality-provider-chart');
-        if (!canvas) return;
-
-        // Destroy existing chart if present
-        if (this.qualityProviderChart) {
-            this.qualityProviderChart.destroy();
-        }
-
-        const labels = Object.keys(providerData);
-        const values = Object.values(providerData);
-
-        // Friendly provider names
-        const friendlyLabels = labels.map(label => {
-            switch(label) {
-                case 'ONNXRankerModel': return 'Local SLM';
-                case 'GroqEvaluator': return 'Groq API';
-                case 'GeminiEvaluator': return 'Gemini API';
-                case 'ImplicitSignalsEvaluator': return 'Implicit Only';
-                case 'local': return 'Local SLM';
-                case 'groq': return 'Groq API';
-                case 'gemini': return 'Gemini API';
-                case 'implicit': return 'Implicit Only';
-                default: return label;
-            }
-        });
-
-        const ctx = canvas.getContext('2d');
-        const isDark = document.body.classList.contains('dark-mode');
-        const textColor = isDark ? '#f9fafb' : '#374151';
-
-        this.qualityProviderChart = new Chart(ctx, {
-            type: 'pie',
-            data: {
-                labels: friendlyLabels,
-                datasets: [{
-                    data: values,
-                    backgroundColor: [
-                        '#4CAF50',  // Local (primary)
-                        '#2196F3',  // Groq
-                        '#FF9800',  // Gemini
-                        '#9E9E9E'   // Implicit
-                    ]
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                plugins: {
-                    legend: {
-                        position: 'bottom',
-                        labels: {
-                            color: textColor
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /**
-     * Render top quality memories list
-     */
-    renderTopQualityMemories(memories) {
-        const container = document.getElementById('quality-top-memories-list');
-        if (!container) return;
-
-        if (!memories || memories.length === 0) {
-            container.innerHTML = '<p class="text-muted">No memories available</p>';
-            return;
-        }
-
-        const html = memories.map(memory => `
-            <div class="memory-preview" onclick="window.app.handleMemoryClick('${memory.content_hash}')">
-                <div class="quality-badge quality-tier-high">
-                    <span class="quality-star">★</span>
-                    <span class="quality-score">${memory.quality_score.toFixed(2)}</span>
-                </div>
-                <div class="memory-content">${this.escapeHtml(memory.content)}</div>
-            </div>
-        `).join('');
-
-        container.innerHTML = html;
-    }
-
-    /**
-     * Render bottom quality memories list (for improvement)
-     */
-    renderBottomQualityMemories(memories) {
-        const container = document.getElementById('quality-bottom-memories-list');
-        if (!container) return;
-
-        if (!memories || memories.length === 0) {
-            container.innerHTML = '<p class="text-muted">No memories available</p>';
-            return;
-        }
-
-        const html = memories.map(memory => `
-            <div class="memory-preview" onclick="window.app.handleMemoryClick('${memory.content_hash}')">
-                <div class="quality-badge quality-tier-low">
-                    <span class="quality-star">★</span>
-                    <span class="quality-score">${memory.quality_score.toFixed(2)}</span>
-                </div>
-                <div class="memory-content">${this.escapeHtml(memory.content)}</div>
-            </div>
-        `).join('');
-
-        container.innerHTML = html;
-    }
-
-    /**
-     * Render quality badge for a memory
-     */
-    renderQualityBadge(memory) {
-        const score = memory.quality_score || memory.metadata?.quality_score || 0.5;
-        const provider = memory.quality_provider || memory.metadata?.quality_provider || 'none';
-
-        // Determine tier
-        let tier = 'low';
-        if (score >= 0.7) tier = 'high';
-        else if (score >= 0.5) tier = 'medium';
-
-        return `
-            <div class="quality-badge quality-tier-${tier}"
-                 data-quality-score="${score.toFixed(2)}"
-                 title="Quality Score: ${score.toFixed(2)} (${provider})">
-                <span class="quality-star">★</span>
-                <span class="quality-score">${score.toFixed(2)}</span>
-            </div>
-        `;
-    }
-
-    /**
-     * Rate a memory manually
-     */
-    async rateMemory(contentHash, rating) {
-        try {
-            const response = await fetch(`${this.apiBase}/quality/memories/${contentHash}/rate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    rating: rating,
-                    feedback: ''
-                })
-            });
-
-            if (!response.ok) throw new Error('Failed to rate memory');
-
-            const result = await response.json();
-            this.showToast(`Rating saved! Quality score updated to ${result.new_quality_score.toFixed(2)}`, 'success');
-
-            // Refresh memory display if viewing details
-            // This would refresh the modal or current view
-
-        } catch (error) {
-            console.error('Failed to rate memory:', error);
-            this.showToast('Failed to save rating', 'error');
-        }
     }
 
     // ===== UTILITY METHODS =====
@@ -4843,11 +3778,8 @@ This action cannot be undone. Are you sure?`);
 }
 
 // Initialize the application when DOM is ready
-console.log('⚡ Registering DOMContentLoaded listener');
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('⚡ DOMContentLoaded fired - Creating MemoryDashboard instance');
     window.app = new MemoryDashboard();
-    console.log('⚡ MemoryDashboard created, window.app =', window.app);
 });
 
 // Cleanup on page unload

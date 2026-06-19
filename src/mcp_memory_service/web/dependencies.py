@@ -17,16 +17,17 @@ FastAPI dependencies for the HTTP interface.
 """
 
 import logging
-from typing import Optional
-from fastapi import HTTPException, Depends
 
-from ..storage.base import MemoryStorage
+from fastapi import Depends, HTTPException
+
 from ..services.memory_service import MemoryService
+from ..shared_storage import get_graph_client, get_write_queue
+from ..storage.base import MemoryStorage
 
 logger = logging.getLogger(__name__)
 
 # Global storage instance
-_storage: Optional[MemoryStorage] = None
+_storage: MemoryStorage | None = None
 
 
 def set_storage(storage: MemoryStorage) -> None:
@@ -44,22 +45,8 @@ def get_storage() -> MemoryStorage:
 
 def get_memory_service(storage: MemoryStorage = Depends(get_storage)) -> MemoryService:
     """Get a MemoryService instance with the configured storage backend."""
-    return MemoryService(storage)
-
-
-
-
-async def create_storage_backend() -> MemoryStorage:
-    """
-    Create and initialize storage backend for web interface based on configuration.
-
-    Returns:
-        Initialized storage backend
-    """
-    from ..config import DATABASE_PATH
-    from ..storage.factory import create_storage_instance
-
-    logger.info("Creating storage backend for web interface...")
-
-    # Use shared factory with DATABASE_PATH for web interface
-    return await create_storage_instance(DATABASE_PATH, server_type="http")
+    return MemoryService(
+        storage,
+        graph_client=get_graph_client(),
+        write_queue=get_write_queue(),
+    )

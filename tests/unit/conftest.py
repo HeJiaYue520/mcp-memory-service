@@ -1,47 +1,25 @@
+"""Unit test conftest — clear CacheKit L1 caches between tests.
+
+CacheKit's L1CacheManager holds all L1Cache instances globally. When
+``backend=None`` (L1-only mode used in CI/tests), cached results from one
+test bleed into the next. ``clear_all()`` nukes every L1Cache instance
+registered with the global manager — no closure-walking needed.
 """
-Shared test fixtures and helpers for unit tests.
-"""
 
-import tempfile
-from pathlib import Path
-from typing import List, Any, Optional
+import pytest
 
 
-async def extract_chunks_from_temp_file(
-    loader: Any,
-    filename: str,
-    content: str,
-    encoding: str = 'utf-8',
-    **extract_kwargs
-) -> List[Any]:
-    """
-    Helper to extract chunks from a temporary file.
+@pytest.fixture(autouse=True)
+def _clear_cachekit_l1():
+    """Clear all CacheKit L1 caches before and after every unit test."""
 
-    Args:
-        loader: Loader instance (CSVLoader, JSONLoader, etc.)
-        filename: Name of the temporary file to create
-        content: Content to write to the file
-        encoding: File encoding (default: utf-8)
-        **extract_kwargs: Additional keyword arguments to pass to extract_chunks()
+    def _clear():
+        try:
+            from cachekit.l1_cache import get_l1_cache_manager
+        except ImportError:
+            return
+        get_l1_cache_manager().clear_all()
 
-    Returns:
-        List of extracted chunks
-
-    Example:
-        >>> loader = CSVLoader(chunk_size=1000, chunk_overlap=200)
-        >>> chunks = await extract_chunks_from_temp_file(
-        ...     loader,
-        ...     "test.csv",
-        ...     "name,age\\nJohn,25",
-        ...     delimiter=','
-        ... )
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = Path(tmpdir) / filename
-        file_path.write_text(content, encoding=encoding)
-
-        chunks = []
-        async for chunk in loader.extract_chunks(file_path, **extract_kwargs):
-            chunks.append(chunk)
-
-        return chunks
+    _clear()
+    yield
+    _clear()

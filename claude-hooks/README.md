@@ -25,7 +25,7 @@ This installs hooks that automatically:
 ## Components
 
 - **Core Hooks**: `session-start.js` (Hook v2.2), `session-end.js`, `memory-retrieval.js` - Smart memory management
-- **Utilities**: Project detection, quality-aware scoring, intelligent formatting, context shift detection  
+- **Utilities**: Project detection, quality-aware scoring, intelligent formatting, context shift detection
 - **Tests**: Comprehensive integration test suite (14 tests)
 
 ## Features
@@ -42,11 +42,10 @@ Three complementary ways to view session memory context:
    - Contains: project details, storage backend, memory statistics, git analysis, top loaded memories
 
 3. **Status Line Display** ⭐ - Always-visible status bar at bottom of terminal
-   - Format: `🧠 8 (8 recent) memories | 📊 10 commits`
-   - Displays static session memory context (set once at session start)
+   - Format: `🧠 8 (8 recent) | 📊 10 commits`
+   - Updates every 300ms with latest session memory context
    - **Requires**: `jq` (JSON parser) and Claude Code statusLine configuration
    - **Platform**: Linux/macOS (Windows SessionStart hook broken - issue #160)
-   - **Windows Workaround**: Use `/session-start` slash command for manual session initialization
 
 ### ✨ **Hook v2.2.0**: Enhanced Output Control
 - **Clean Output Mode**: Configurable verbosity levels for minimal or detailed output
@@ -54,7 +53,7 @@ Three complementary ways to view session memory context:
 - **Professional UX**: Removed noisy wrapper tags and improved ANSI formatting
 - **Granular Control**: Fine-tune what information is displayed during hook execution
 
-### 🧠 **Previous Features (Project v6.7.0)**: Smart Memory Context  
+### 🧠 **Previous Features (Project v6.7.0)**: Smart Memory Context
 - **Quality Content Extraction**: Extracts actual decisions/insights from session summaries instead of "implementation..." fluff
 - **Duplicate Filtering**: Automatically removes repetitive session summaries
 - **Smart Timing**: Only injects memories when contextually appropriate (no more mid-session disruptions)
@@ -62,7 +61,7 @@ Three complementary ways to view session memory context:
 
 ### 🧠 **Core Features**
 - **Automatic Memory Injection**: Load relevant memories at session start with quality filtering
-- **Project Awareness**: Detect current project context and frameworks  
+- **Project Awareness**: Detect current project context and frameworks
 - **Memory Consolidation**: Store session outcomes and insights
 - **Intelligent Selection**: Quality-aware scoring that prioritizes meaningful content over just recency
 
@@ -138,7 +137,7 @@ Edit `~/.claude/hooks/config.json`:
 
 **Verbosity Levels**:
 - **Normal** (`verbose: true`, others `false`): Shows essential information only
-- **Detailed** (`showMemoryDetails: true`): Include memory scoring details  
+- **Detailed** (`showMemoryDetails: true`): Include memory scoring details
 - **Clean** (`cleanMode: true`): Minimal output, only success/error messages
 - **Silent** (`verbose: false`): Hook works silently in background
 

@@ -4,9 +4,9 @@
 
 ### ✅ **Phase 1: Core Performance Improvements**
 
-#### 1. **Model Caching System** 
+#### 1. **Model Caching System**
 - **File**: `src/mcp_memory_service/storage/chroma.py`
-- **Changes**: 
+- **Changes**:
   - Added thread-safe global model cache `_MODEL_CACHE` with proper locking
   - Implemented `_initialize_with_cache()` method for reusing loaded models
   - Added `preload_model=True` parameter to constructor
@@ -78,7 +78,7 @@
 | **Warm Start** | 0.5-2s | 0.05-0.2s | **80% faster** |
 | **Repeated Queries** | 0.5-2s | 0.05-0.1s | **90% faster** |
 | **Tag Searches** | 1-3s | 0.1-0.5s | **70% faster** |
-| **Batch Operations** | Nx0.2s | 0.1-0.3s total | **75% faster** |
+| **Batch Operations** | N×0.2s | 0.1-0.3s total | **75% faster** |
 | **Memory Usage** | High | Reduced ~40% | **Better efficiency** |
 
 ## 🔧 **Key Technical Optimizations**

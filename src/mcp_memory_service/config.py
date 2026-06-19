@@ -13,213 +13,59 @@
 # limitations under the License.
 
 """
-MCP Memory Service Configuration
+MCP Memory Service Configuration using Pydantic Settings
 
-Environment Variables:
-- MCP_MEMORY_STORAGE_BACKEND: Storage backend ('sqlite_vec', 'cloudflare', or 'hybrid')
-- MCP_MEMORY_SQLITE_PATH: SQLite-vec database file path
-- MCP_MEMORY_USE_ONNX: Use ONNX embeddings ('true'/'false')
-
-Copyright (c) 2024 Heinrich Krupp
-Licensed under the Apache License, Version 2.0
+All configuration is type-safe, validated, and loaded from environment variables.
+Sensitive values use SecretStr for security.
 """
-import os
-import sys
-import secrets
-from pathlib import Path
-from typing import Optional
-import time
+
 import logging
+import os
+import secrets
+import threading
+import time
+from typing import Literal
 
-# Load environment variables from .env file if it exists
-# Search multiple locations to handle both development and installed scenarios
-def _find_and_load_dotenv():
-    """Find and load .env file from multiple possible locations."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        # dotenv not available, skip loading
-        return None
-
-    # Possible .env locations (in priority order):
-    env_candidates = [
-        # 1. Current working directory (highest priority)
-        Path.cwd() / ".env",
-        # 2. Relative to this config file (for source installs)
-        Path(__file__).parent.parent.parent / ".env",
-        # 3. Project root markers (look for pyproject.toml)
-        *[p.parent / ".env" for p in Path(__file__).parents if (p / "pyproject.toml").exists()],
-        # 4. Common Windows project paths
-        Path("C:/REPOSITORIES/personal/mcp-memory-service/.env"),
-        Path("C:/REPOSITORIES/mcp-memory-service/.env"),
-        # 5. User home directory
-        Path.home() / ".mcp-memory" / ".env",
-    ]
-
-    for env_file in env_candidates:
-        try:
-            if env_file.exists():
-                load_dotenv(env_file, override=False)  # Don't override existing env vars
-                return env_file
-        except (OSError, PermissionError):
-            continue
-
-    return None
-
-_loaded_env_file = _find_and_load_dotenv()
-if _loaded_env_file:
-    logging.getLogger(__name__).info(f"Loaded environment from {_loaded_env_file}")
+from platformdirs import user_data_dir
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
-def safe_get_int_env(env_var: str, default: int, min_value: int = None, max_value: int = None) -> int:
-    """
-    Safely parse an integer environment variable with validation and error handling.
 
-    Args:
-        env_var: Environment variable name
-        default: Default value if not set or invalid
-        min_value: Minimum allowed value (optional)
-        max_value: Maximum allowed value (optional)
+# =============================================================================
+# Path Validation Utilities
+# =============================================================================
 
-    Returns:
-        Parsed and validated integer value
-
-    Raises:
-        ValueError: If the value is outside the specified range
-    """
-    env_value = os.getenv(env_var)
-    if not env_value:
-        return default
-
-    try:
-        value = int(env_value)
-
-        # Validate range if specified
-        if min_value is not None and value < min_value:
-            logger.error(f"Environment variable {env_var}={value} is below minimum {min_value}, using default {default}")
-            return default
-
-        if max_value is not None and value > max_value:
-            logger.error(f"Environment variable {env_var}={value} is above maximum {max_value}, using default {default}")
-            return default
-
-        logger.debug(f"Environment variable {env_var}={value} parsed successfully")
-        return value
-
-    except ValueError as e:
-        logger.error(f"Invalid integer value for {env_var}='{env_value}': {e}. Using default {default}")
-        return default
-
-def safe_get_optional_int_env(env_var: str, default: Optional[int] = None, min_value: int = None, max_value: int = None, none_values: tuple = ('none', 'null', 'unlimited', '')) -> Optional[int]:
-    """
-    Safely parse an optional integer environment variable with validation and error handling.
-
-    Args:
-        env_var: Environment variable name
-        default: Default value if not set or invalid (None for unlimited)
-        min_value: Minimum allowed value (optional)
-        max_value: Maximum allowed value (optional)
-        none_values: Tuple of string values that should be interpreted as None
-
-    Returns:
-        Parsed and validated integer value, or None if explicitly set to a none_value
-    """
-    env_value = os.getenv(env_var)
-    if not env_value:
-        return default
-
-    # Check if value should be interpreted as None/unlimited
-    if env_value.lower().strip() in none_values:
-        return None
-
-    try:
-        value = int(env_value.strip())
-
-        # Validate range if specified
-        if min_value is not None and value < min_value:
-            logger.warning(f"Environment variable {env_var}={value} is below minimum {min_value}. Using default {default}")
-            return default
-
-        if max_value is not None and value > max_value:
-            logger.warning(f"Environment variable {env_var}={value} is above maximum {max_value}. Using default {default}")
-            return default
-
-        return value
-
-    except ValueError:
-        logger.warning(f"Invalid value for {env_var}='{env_value}'. Expected integer or {'/'.join(none_values)}. Using default {default}")
-        return default
-
-def safe_get_bool_env(env_var: str, default: bool) -> bool:
-    """
-    Safely parse a boolean environment variable with validation and error handling.
-
-    Args:
-        env_var: Environment variable name
-        default: Default value if not set or invalid
-
-    Returns:
-        Parsed boolean value
-    """
-    env_value = os.getenv(env_var)
-    if not env_value:
-        return default
-
-    env_value_lower = env_value.lower().strip()
-
-    if env_value_lower in ('true', '1', 'yes', 'on', 'enabled'):
-        return True
-    elif env_value_lower in ('false', '0', 'no', 'off', 'disabled'):
-        return False
-    else:
-        logger.error(f"Invalid boolean value for {env_var}='{env_value}'. Expected true/false, 1/0, yes/no, on/off, enabled/disabled. Using default {default}")
-        return default
 
 def validate_and_create_path(path: str) -> str:
-    """Validate and create a directory path, ensuring it's writable.
-    
-    This function ensures that the specified directory path exists and is writable.
-    It performs several checks and has a retry mechanism to handle potential race
-    conditions, especially when running in environments like Claude Desktop where
-    file system operations might be more restricted.
-    """
+    """Validate and create a directory path, ensuring it's writable."""
     try:
-        # Convert to absolute path and expand user directory if present (e.g. ~)
         abs_path = os.path.abspath(os.path.expanduser(path))
         logger.debug(f"Validating path: {abs_path}")
-        
-        # Create directory and all parents if they don't exist
-        try:
-            os.makedirs(abs_path, exist_ok=True)
-            logger.debug(f"Created directory (or already exists): {abs_path}")
-        except Exception as e:
-            logger.error(f"Error creating directory {abs_path}: {str(e)}")
-            raise PermissionError(f"Cannot create directory {abs_path}: {str(e)}")
-            
-        # Add small delay to prevent potential race conditions on macOS during initial write test
-        time.sleep(0.1)
-        
-        # Verify that the path exists and is a directory
+
+        os.makedirs(abs_path, exist_ok=True)
+        logger.debug(f"Created directory (or already exists): {abs_path}")
+
+        time.sleep(0.1)  # Prevent race conditions on macOS
+
         if not os.path.exists(abs_path):
-            logger.error(f"Path does not exist after creation attempt: {abs_path}")
             raise PermissionError(f"Path does not exist: {abs_path}")
-        
+
         if not os.path.isdir(abs_path):
-            logger.error(f"Path is not a directory: {abs_path}")
             raise PermissionError(f"Path is not a directory: {abs_path}")
-        
-        # Write test with retry mechanism
+
+        # Write test with retry
         max_retries = 3
         retry_delay = 0.5
-        test_file = os.path.join(abs_path, '.write_test')
-        
+        test_file = os.path.join(abs_path, ".write_test")
+
         for attempt in range(max_retries):
             try:
-                logger.debug(f"Testing write permissions (attempt {attempt+1}/{max_retries}): {test_file}")
-                with open(test_file, 'w') as f:
-                    f.write('test')
-                
+                logger.debug(f"Testing write permissions (attempt {attempt + 1}/{max_retries}): {test_file}")
+                with open(test_file, "w") as f:
+                    f.write("test")
+
                 if os.path.exists(test_file):
                     logger.debug(f"Successfully wrote test file: {test_file}")
                     os.remove(test_file)
@@ -229,599 +75,1076 @@ def validate_and_create_path(path: str) -> str:
                 else:
                     logger.warning(f"Test file was not created: {test_file}")
             except Exception as e:
-                logger.warning(f"Error during write test (attempt {attempt+1}/{max_retries}): {str(e)}")
+                logger.warning(f"Error during write test (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     logger.debug(f"Retrying after {retry_delay}s...")
                     time.sleep(retry_delay)
                 else:
                     logger.error(f"All write test attempts failed for {abs_path}")
-                    raise PermissionError(f"Directory {abs_path} is not writable: {str(e)}")
-        
+                    raise PermissionError(f"Directory {abs_path} is not writable: {e}") from e
+
         return abs_path
     except Exception as e:
-        logger.error(f"Error validating path {path}: {str(e)}")
+        logger.error(f"Error validating path {path}: {e}")
         raise
 
-# Determine base directory - prefer local over Cloud
-def get_base_directory() -> str:
-    """Get base directory for storage, with fallback options."""
-    # First choice: Environment variable
-    if base_dir := os.getenv('MCP_MEMORY_BASE_DIR'):
-        return validate_and_create_path(base_dir)
-    
-    # Second choice: Local app data directory
-    home = str(Path.home())
-    if sys.platform == 'darwin':  # macOS
-        base = os.path.join(home, 'Library', 'Application Support', 'mcp-memory')
-    elif sys.platform == 'win32':  # Windows
-        base = os.path.join(os.getenv('LOCALAPPDATA', ''), 'mcp-memory')
-    else:  # Linux and others
-        base = os.path.join(home, '.local', 'share', 'mcp-memory')
-    
+
+def get_default_base_directory() -> str:
+    """
+    Get platform-specific default base directory using platformdirs.
+
+    Uses XDG-compliant paths:
+    - Linux: ~/.local/share/mcp-memory (XDG_DATA_HOME)
+    - macOS: ~/Library/Application Support/mcp-memory
+    - Windows: C:\\Users\\<user>\\AppData\\Local\\mcp-memory
+    """
+    base = user_data_dir("mcp-memory", ensure_exists=True)
     return validate_and_create_path(base)
 
-# Initialize paths
-try:
-    BASE_DIR = get_base_directory()
-    
-    # Try multiple environment variable names for backups path
-    backups_path = None
-    for env_var in ['MCP_MEMORY_BACKUPS_PATH', 'mcpMemoryBackupsPath']:
-        if path := os.getenv(env_var):
-            backups_path = path
-            logger.info(f"Using {env_var}={path} for backups path")
-            break
-    
-    # If no environment variable is set, use the default path
-    if not backups_path:
-        backups_path = os.path.join(BASE_DIR, 'backups')
-        logger.info(f"No backups path environment variable found, using default: {backups_path}")
-
-    BACKUPS_PATH = validate_and_create_path(backups_path)
-
-    # Print the final paths used
-    logger.info(f"Using backups path: {BACKUPS_PATH}")
-
-except Exception as e:
-    logger.error(f"Fatal error initializing paths: {str(e)}")
-    sys.exit(1)
-
-# Server settings
-SERVER_NAME = "memory"
-# Import version from main package for consistency
-from . import __version__ as SERVER_VERSION
-
-# Storage backend configuration
-SUPPORTED_BACKENDS = ['sqlite_vec', 'sqlite-vec', 'cloudflare', 'hybrid']
-STORAGE_BACKEND = os.getenv('MCP_MEMORY_STORAGE_BACKEND', 'sqlite_vec').lower()
-
-# Normalize backend names (sqlite-vec -> sqlite_vec)
-if STORAGE_BACKEND == 'sqlite-vec':
-    STORAGE_BACKEND = 'sqlite_vec'
-
-# Validate backend selection
-if STORAGE_BACKEND not in SUPPORTED_BACKENDS:
-    logger.warning(f"Unknown storage backend: {STORAGE_BACKEND}, falling back to sqlite_vec")
-    STORAGE_BACKEND = 'sqlite_vec'
-
-logger.info(f"Using storage backend: {STORAGE_BACKEND}")
 
 # =============================================================================
-# Content Length Limits Configuration (v7.5.0+)
+# Settings Models
 # =============================================================================
 
-# Backend-specific content length limits based on embedding model constraints
-# These limits prevent embedding failures and enable automatic content splitting
 
-# Cloudflare: BGE-base-en-v1.5 model has 512 token limit
-# Using 800 characters as safe limit (~400 tokens with overhead)
-CLOUDFLARE_MAX_CONTENT_LENGTH = safe_get_int_env(
-    'MCP_CLOUDFLARE_MAX_CONTENT_LENGTH',
-    default=800,
-    min_value=100,
-    max_value=10000
-)
+class PathSettings(BaseSettings):
+    """File system paths configuration."""
 
-# SQLite-vec: No inherent limit (local storage)
-# Set to None for unlimited, or configure via environment variable
-SQLITEVEC_MAX_CONTENT_LENGTH = safe_get_optional_int_env(
-    'MCP_SQLITEVEC_MAX_CONTENT_LENGTH',
-    default=None,
-    min_value=100,
-    max_value=10000
-)
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_MEMORY_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
 
-# Hybrid: Constrained by Cloudflare secondary storage (configurable)
-HYBRID_MAX_CONTENT_LENGTH = safe_get_int_env(
-    'MCP_HYBRID_MAX_CONTENT_LENGTH',
-    default=CLOUDFLARE_MAX_CONTENT_LENGTH,
-    min_value=100,
-    max_value=10000
-)
+    base_dir: str = Field(default_factory=get_default_base_directory, description="Base directory for all MCP memory data")
 
-# Enable automatic content splitting when limits are exceeded
-ENABLE_AUTO_SPLIT = safe_get_bool_env('MCP_ENABLE_AUTO_SPLIT', default=True)
+    backups_path: str | None = Field(default=None, description="Path for database backups")
 
-# Content splitting configuration
-CONTENT_SPLIT_OVERLAP = safe_get_int_env(
-    'MCP_CONTENT_SPLIT_OVERLAP',
-    default=50,
-    min_value=0,
-    max_value=500
-)
-CONTENT_PRESERVE_BOUNDARIES = safe_get_bool_env('MCP_CONTENT_PRESERVE_BOUNDARIES', default=True)
+    @model_validator(mode="after")
+    def validate_paths(self) -> "PathSettings":
+        """Validate and create all paths."""
+        # Ensure base_dir is created
+        self.base_dir = validate_and_create_path(self.base_dir)
 
-logger.info(f"Content length limits - Cloudflare: {CLOUDFLARE_MAX_CONTENT_LENGTH}, "
-           f"SQLite-vec: {'unlimited' if SQLITEVEC_MAX_CONTENT_LENGTH is None else SQLITEVEC_MAX_CONTENT_LENGTH}, "
-           f"Auto-split: {ENABLE_AUTO_SPLIT}")
+        # Set backups_path default if not provided
+        if not self.backups_path:
+            self.backups_path = os.path.join(self.base_dir, "backups")
+        self.backups_path = validate_and_create_path(self.backups_path)
 
-# =============================================================================
-# End Content Length Limits Configuration
-# =============================================================================
+        return self
 
-# SQLite-vec specific configuration (also needed for hybrid backend)
-if STORAGE_BACKEND == 'sqlite_vec' or STORAGE_BACKEND == 'hybrid':
-    # Try multiple environment variable names for SQLite-vec path
-    sqlite_vec_path = None
-    for env_var in ['MCP_MEMORY_SQLITE_PATH', 'MCP_MEMORY_SQLITEVEC_PATH']:
-        if path := os.getenv(env_var):
-            sqlite_vec_path = path
-            logger.info(f"Using {env_var}={path} for SQLite-vec database path")
-            break
-    
-    # If no environment variable is set, use the default path
-    if not sqlite_vec_path:
-        sqlite_vec_path = os.path.join(BASE_DIR, 'sqlite_vec.db')
-        logger.info(f"No SQLite-vec path environment variable found, using default: {sqlite_vec_path}")
-    
-    # Ensure directory exists for SQLite database
-    sqlite_dir = os.path.dirname(sqlite_vec_path)
-    if sqlite_dir:
-        os.makedirs(sqlite_dir, exist_ok=True)
-    
-    SQLITE_VEC_PATH = sqlite_vec_path
-    logger.info(f"Using SQLite-vec database path: {SQLITE_VEC_PATH}")
-else:
-    SQLITE_VEC_PATH = None
 
-# ONNX Configuration
-USE_ONNX = os.getenv('MCP_MEMORY_USE_ONNX', '').lower() in ('1', 'true', 'yes')
-if USE_ONNX:
-    logger.info("ONNX embeddings enabled - using PyTorch-free embedding generation")
-    # ONNX model cache directory
-    ONNX_MODEL_CACHE = os.path.join(BASE_DIR, 'onnx_models')
-    os.makedirs(ONNX_MODEL_CACHE, exist_ok=True)
+class ServerSettings(BaseSettings):
+    """Server identification and version."""
 
-# Cloudflare specific configuration (also needed for hybrid backend)
-if STORAGE_BACKEND == 'cloudflare' or STORAGE_BACKEND == 'hybrid':
-    # Required Cloudflare settings
-    CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
-    CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
-    CLOUDFLARE_VECTORIZE_INDEX = os.getenv('CLOUDFLARE_VECTORIZE_INDEX')
-    CLOUDFLARE_D1_DATABASE_ID = os.getenv('CLOUDFLARE_D1_DATABASE_ID')
-    
-    # Optional Cloudflare settings
-    CLOUDFLARE_R2_BUCKET = os.getenv('CLOUDFLARE_R2_BUCKET')  # For large content storage
-    CLOUDFLARE_EMBEDDING_MODEL = os.getenv('CLOUDFLARE_EMBEDDING_MODEL', '@cf/baai/bge-base-en-v1.5')
-    CLOUDFLARE_LARGE_CONTENT_THRESHOLD = int(os.getenv('CLOUDFLARE_LARGE_CONTENT_THRESHOLD', '1048576'))  # 1MB
-    CLOUDFLARE_MAX_RETRIES = int(os.getenv('CLOUDFLARE_MAX_RETRIES', '3'))
-    CLOUDFLARE_BASE_DELAY = float(os.getenv('CLOUDFLARE_BASE_DELAY', '1.0'))
-    
-    # Validate required settings
-    missing_vars = []
-    if not CLOUDFLARE_API_TOKEN:
-        missing_vars.append('CLOUDFLARE_API_TOKEN')
-    if not CLOUDFLARE_ACCOUNT_ID:
-        missing_vars.append('CLOUDFLARE_ACCOUNT_ID')
-    if not CLOUDFLARE_VECTORIZE_INDEX:
-        missing_vars.append('CLOUDFLARE_VECTORIZE_INDEX')
-    if not CLOUDFLARE_D1_DATABASE_ID:
-        missing_vars.append('CLOUDFLARE_D1_DATABASE_ID')
-    
-    if missing_vars:
-        logger.error(f"Missing required environment variables for Cloudflare backend: {', '.join(missing_vars)}")
-        logger.error("Please set the required variables or switch to a different backend")
-        sys.exit(1)
-    
-    logger.info(f"Using Cloudflare backend with:")
-    logger.info(f"  Vectorize Index: {CLOUDFLARE_VECTORIZE_INDEX}")
-    logger.info(f"  D1 Database: {CLOUDFLARE_D1_DATABASE_ID}")
-    logger.info(f"  R2 Bucket: {CLOUDFLARE_R2_BUCKET or 'Not configured'}")
-    logger.info(f"  Embedding Model: {CLOUDFLARE_EMBEDDING_MODEL}")
-    logger.info(f"  Large Content Threshold: {CLOUDFLARE_LARGE_CONTENT_THRESHOLD} bytes")
-else:
-    # Set Cloudflare variables to None when not using Cloudflare backend
-    CLOUDFLARE_API_TOKEN = None
-    CLOUDFLARE_ACCOUNT_ID = None
-    CLOUDFLARE_VECTORIZE_INDEX = None
-    CLOUDFLARE_D1_DATABASE_ID = None
-    CLOUDFLARE_R2_BUCKET = None
-    CLOUDFLARE_EMBEDDING_MODEL = None
-    CLOUDFLARE_LARGE_CONTENT_THRESHOLD = None
-    CLOUDFLARE_MAX_RETRIES = None
-    CLOUDFLARE_BASE_DELAY = None
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-# Hybrid backend specific configuration
-if STORAGE_BACKEND == 'hybrid':
-    # Sync service configuration
-    HYBRID_SYNC_INTERVAL = int(os.getenv('MCP_HYBRID_SYNC_INTERVAL', '300'))  # 5 minutes default
-    HYBRID_BATCH_SIZE = int(os.getenv('MCP_HYBRID_BATCH_SIZE', '100'))  # Increased from 50 for bulk operations
-    HYBRID_QUEUE_SIZE = int(os.getenv('MCP_HYBRID_QUEUE_SIZE', '2000'))  # Increased from 1000 for bulk operations
-    HYBRID_MAX_QUEUE_SIZE = int(os.getenv('MCP_HYBRID_MAX_QUEUE_SIZE', '1000'))  # Legacy - use HYBRID_QUEUE_SIZE
-    HYBRID_MAX_RETRIES = int(os.getenv('MCP_HYBRID_MAX_RETRIES', '3'))
+    name: str = Field(default="memory", description="Server name")
 
-    # Sync ownership control (v8.27.0+) - Prevents duplicate sync queues
-    # Values: "http" (HTTP server only), "mcp" (MCP server only), "both" (both servers sync)
-    # Recommended: "http" to avoid duplicate sync work
-    HYBRID_SYNC_OWNER = os.getenv('MCP_HYBRID_SYNC_OWNER', 'both').lower()
+    # Version is imported from __init__.py at runtime
+    @property
+    def version(self) -> str:
+        """Get version from package."""
+        try:
+            from . import __version__
+
+            return __version__
+        except ImportError:
+            return "unknown"
+
+
+class StorageSettings(BaseSettings):
+    """Storage backend configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_MEMORY_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    embedding_model: str = Field(
+        default="nomic-ai/nomic-embed-text-v1.5",  # Nomic v1.5: ~62 MTEB avg, 768-dim, 8K context, trust_remote_code
+        description="Embedding model name (env: MCP_MEMORY_EMBEDDING_MODEL)",
+    )
+
+    use_onnx: bool = Field(default=False, description="Use ONNX for embeddings (PyTorch-free) (env: MCP_MEMORY_USE_ONNX)")
+
+
+class ContentLimitsSettings(BaseSettings):
+    """Content length limits and splitting configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    enable_auto_split: bool = Field(default=True, description="Enable automatic content splitting when limits exceeded")
+
+    content_split_overlap: int = Field(default=50, ge=0, le=500, description="Overlap between split content chunks (characters)")
+
+    content_preserve_boundaries: bool = Field(default=True, description="Preserve sentence/paragraph boundaries when splitting")
+
+
+class HTTPSettings(BaseSettings):
+    """HTTP/HTTPS server configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    http_enabled: bool = Field(default=False)
+    http_port: int = Field(default=8000, ge=1024, le=65535)
+    http_host: str = Field(default="0.0.0.0")
+    http_workers: int = Field(default=1, ge=1, le=32, description="Number of uvicorn worker processes (env: MCP_HTTP_WORKERS)")
+    cors_origins: list[str] = Field(default=[])  # Secure default: no cross-origin access (CWE-942 fix)
+    sse_heartbeat: int = Field(default=30, ge=5, le=300, alias="SSE_HEARTBEAT_INTERVAL")
+    api_key: SecretStr | None = Field(default=None)
+
+    # HTTPS
+    https_enabled: bool = Field(default=False)
+    ssl_cert_file: str | None = Field(default=None)
+    ssl_key_file: str | None = Field(default=None)
+
+    # mDNS Service Discovery (disabled: zeroconf removed)
+    mdns_enabled: bool = Field(default=False)
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        """Parse and normalize CORS origins.
+
+        Handles comma-separated strings or lists, trimming whitespace
+        and filtering empty entries for exact CORS matching.
+        """
+        if isinstance(v, str):
+            # Split on comma, strip whitespace, filter empty
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        if isinstance(v, list):
+            # Strip whitespace from each, filter empty
+            return [origin.strip() for origin in v if isinstance(origin, str) and origin.strip()]
+        return v
+
+
+class OAuthSettings(BaseSettings):
+    """OAuth 2.1 configuration with secure key management."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_OAUTH_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    enabled: bool = Field(default=False)  # Disabled: authlib/python-jose removed (CRITICAL CVEs)
+
+    # RSA key pair for JWT signing (SecretStr for security)
+    private_key: SecretStr | None = Field(default=None)
+    public_key: str | None = Field(default=None)
+
+    # Fallback symmetric key for HS256
+    secret_key: SecretStr | None = Field(default=None)
+
+    # OAuth server config
+    issuer: str | None = Field(default=None)
+    access_token_expire_minutes: int = Field(default=60, ge=1, le=1440)
+    authorization_code_expire_minutes: int = Field(default=10, ge=1, le=60)
+
+    # Security
+    allow_anonymous_access: bool = Field(default=False, alias="MCP_ALLOW_ANONYMOUS_ACCESS")
+
+    @model_validator(mode="after")
+    def generate_keys_if_needed(self) -> "OAuthSettings":
+        """Generate RSA key pair if not provided."""
+        if not self.enabled:
+            return self
+
+        if not self.private_key or not self.public_key:
+            try:
+                from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric import rsa
+
+                private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+
+                private_pem = private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                ).decode("utf-8")
+
+                public_key = private_key.public_key()
+                public_pem = public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode("utf-8")
+
+                self.private_key = SecretStr(private_pem)
+                self.public_key = public_pem
+
+                logger.info("Generated RSA key pair for OAuth (set MCP_OAUTH_PRIVATE_KEY for persistence)")
+
+            except ImportError:
+                logger.warning("cryptography not available, using HS256 symmetric key")
+                if not self.secret_key:
+                    self.secret_key = SecretStr(secrets.token_urlsafe(32))
+                    logger.info("Generated OAuth secret key (set MCP_OAUTH_SECRET_KEY for persistence)")
+
+        return self
+
+    def get_jwt_algorithm(self) -> str:
+        """Get JWT algorithm based on available keys."""
+        return "RS256" if self.private_key and self.public_key else "HS256"
+
+    def get_jwt_signing_key(self) -> str:
+        """Get key for JWT signing."""
+        if self.private_key and self.public_key:
+            return self.private_key.get_secret_value()
+        elif self.secret_key:
+            return self.secret_key.get_secret_value()
+        else:
+            raise ValueError("No JWT signing key available")
+
+    def get_jwt_verification_key(self) -> str:
+        """Get key for JWT verification."""
+        if self.private_key and self.public_key:
+            return self.public_key
+        elif self.secret_key:
+            return self.secret_key.get_secret_value()
+        else:
+            raise ValueError("No JWT verification key available")
+
+
+class QdrantSettings(BaseSettings):
+    """Qdrant vector database configuration with auto-tuned HNSW parameters."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_QDRANT_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    # User-facing configuration
+    url: str | None = Field(
+        default=None,
+        description="Qdrant server URL (e.g., http://localhost:6333). If set, uses network mode instead of embedded.",
+    )
+
+    storage_path: str | None = Field(
+        default=None, description="Path to Qdrant storage directory for embedded mode (auto-detected if not provided)"
+    )
+
+    quantization_enabled: bool = Field(default=False, description="Enable scalar quantization (32x memory savings, ~10% slower)")
+
+    # Auto-tuned constants (not configurable by users)
+    COLLECTION_NAME: str = "memories"
+    DISTANCE_METRIC: str = "Cosine"  # Qdrant Distance enum value
+
+    # HNSW parameters optimized for <1M vectors
+    HNSW_M: int = 16  # Number of edges per node (16 = balanced quality/speed)
+    HNSW_EF_CONSTRUCT: int = 100  # Construction time quality (100 = good quality)
+    HNSW_EF: int = 128  # Search quality (128 = high recall)
+    HNSW_FULL_SCAN_THRESHOLD: int = 10000  # Use brute force below this count
+
+    # Quantization config
+    QUANTIZATION_TYPE: str = "scalar"  # Only scalar supported for now
+    QUANTIZATION_ALWAYS_RAM: bool = True  # Keep quantized vectors in RAM
 
     # Performance tuning
-    HYBRID_ENABLE_HEALTH_CHECKS = os.getenv('MCP_HYBRID_ENABLE_HEALTH_CHECKS', 'true').lower() == 'true'
-    HYBRID_HEALTH_CHECK_INTERVAL = int(os.getenv('MCP_HYBRID_HEALTH_CHECK_INTERVAL', '60'))  # 1 minute
-    HYBRID_SYNC_ON_STARTUP = os.getenv('MCP_HYBRID_SYNC_ON_STARTUP', 'true').lower() == 'true'
+    ON_DISK_PAYLOAD: bool = False  # Keep payload in memory (faster, <1M vectors)
+    INDEXING_THRESHOLD: int = 20000  # Start indexing after this many vectors
 
-    # Drift detection and metadata sync (v8.25.0+)
-    HYBRID_SYNC_UPDATES = os.getenv('MCP_HYBRID_SYNC_UPDATES', 'true').lower() == 'true'
-    HYBRID_DRIFT_CHECK_INTERVAL = int(os.getenv('MCP_HYBRID_DRIFT_CHECK_INTERVAL', '3600'))  # 1 hour default
-    HYBRID_DRIFT_BATCH_SIZE = int(os.getenv('MCP_HYBRID_DRIFT_BATCH_SIZE', '100'))
+    @model_validator(mode="after")
+    def set_platform_paths(self) -> "QdrantSettings":
+        """Set platform-specific default storage path with secure permissions."""
+        # If URL is set, we're in server mode - skip storage path setup
+        if self.url:
+            logger.info(f"Qdrant server mode: {self.url}")
+            # Clear storage_path to make it explicit we're in network mode
+            self.storage_path = None
+            return self
 
-    # Initial sync behavior tuning (v7.5.4+)
-    HYBRID_MAX_EMPTY_BATCHES = safe_get_int_env('MCP_HYBRID_MAX_EMPTY_BATCHES', 20, min_value=1)  # Stop after N batches without new syncs
-    HYBRID_MIN_CHECK_COUNT = safe_get_int_env('MCP_HYBRID_MIN_CHECK_COUNT', 1000, min_value=1)  # Minimum memories to check before early stop
+        # Embedded mode - set up storage path using platformdirs
+        if not self.storage_path:
+            base = user_data_dir("mcp-memory", ensure_exists=True)
+            self.storage_path = os.path.join(base, "qdrant")
 
-    # Fallback behavior
-    HYBRID_FALLBACK_TO_PRIMARY = os.getenv('MCP_HYBRID_FALLBACK_TO_PRIMARY', 'true').lower() == 'true'
-    HYBRID_WARN_ON_SECONDARY_FAILURE = os.getenv('MCP_HYBRID_WARN_ON_SECONDARY_FAILURE', 'true').lower() == 'true'
+        # Create directory with secure permissions (0o700 - owner only)
+        abs_path = os.path.abspath(os.path.expanduser(self.storage_path))
+        os.makedirs(abs_path, mode=0o700, exist_ok=True)
+        self.storage_path = abs_path
 
-    logger.info(f"Hybrid storage configuration: sync_interval={HYBRID_SYNC_INTERVAL}s, batch_size={HYBRID_BATCH_SIZE}")
+        logger.info(f"Qdrant embedded mode: {self.storage_path}")
 
-    # Cloudflare Service Limits (for validation and monitoring)
-    CLOUDFLARE_D1_MAX_SIZE_GB = 10  # D1 database hard limit
-    CLOUDFLARE_VECTORIZE_MAX_VECTORS = 5_000_000  # Maximum vectors per index
-    CLOUDFLARE_MAX_METADATA_SIZE_KB = 10  # Maximum metadata size per vector
-    CLOUDFLARE_MAX_FILTER_SIZE_BYTES = 2048  # Maximum filter query size
-    CLOUDFLARE_MAX_STRING_INDEX_SIZE_BYTES = 64  # Maximum indexed string size
-    CLOUDFLARE_BATCH_INSERT_LIMIT = 200_000  # Maximum batch insert size
+        return self
 
-    # Limit warning thresholds (percentage)
-    CLOUDFLARE_WARNING_THRESHOLD_PERCENT = 80  # Warn at 80% capacity
-    CLOUDFLARE_CRITICAL_THRESHOLD_PERCENT = 95  # Critical at 95% capacity
 
-    # Validate Cloudflare configuration for hybrid mode
-    if not (CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_VECTORIZE_INDEX and CLOUDFLARE_D1_DATABASE_ID):
-        logger.warning("Hybrid mode requires Cloudflare configuration. Missing required variables:")
-        if not CLOUDFLARE_API_TOKEN:
-            logger.warning("  - CLOUDFLARE_API_TOKEN")
-        if not CLOUDFLARE_ACCOUNT_ID:
-            logger.warning("  - CLOUDFLARE_ACCOUNT_ID")
-        if not CLOUDFLARE_VECTORIZE_INDEX:
-            logger.warning("  - CLOUDFLARE_VECTORIZE_INDEX")
-        if not CLOUDFLARE_D1_DATABASE_ID:
-            logger.warning("  - CLOUDFLARE_D1_DATABASE_ID")
-        logger.warning("Hybrid mode will operate in SQLite-only mode until Cloudflare is configured")
-else:
-    # Set hybrid-specific variables to None when not using hybrid backend
-    HYBRID_SYNC_INTERVAL = None
-    HYBRID_BATCH_SIZE = None
-    HYBRID_QUEUE_SIZE = None
-    HYBRID_MAX_QUEUE_SIZE = None
-    HYBRID_MAX_RETRIES = None
-    HYBRID_SYNC_OWNER = None
-    HYBRID_ENABLE_HEALTH_CHECKS = None
-    HYBRID_HEALTH_CHECK_INTERVAL = None
-    HYBRID_SYNC_ON_STARTUP = None
-    HYBRID_SYNC_UPDATES = None
-    HYBRID_DRIFT_CHECK_INTERVAL = None
-    HYBRID_DRIFT_BATCH_SIZE = None
-    HYBRID_MAX_EMPTY_BATCHES = None
-    HYBRID_MIN_CHECK_COUNT = None
-    HYBRID_FALLBACK_TO_PRIMARY = None
-    HYBRID_WARN_ON_SECONDARY_FAILURE = None
+class FalkorDBSettings(BaseSettings):
+    """FalkorDB graph database configuration for cognitive memory graph layer."""
 
-    # Also set limit constants to None
-    CLOUDFLARE_D1_MAX_SIZE_GB = None
-    CLOUDFLARE_VECTORIZE_MAX_VECTORS = None
-    CLOUDFLARE_MAX_METADATA_SIZE_KB = None
-    CLOUDFLARE_MAX_FILTER_SIZE_BYTES = None
-    CLOUDFLARE_MAX_STRING_INDEX_SIZE_BYTES = None
-    CLOUDFLARE_BATCH_INSERT_LIMIT = None
-    CLOUDFLARE_WARNING_THRESHOLD_PERCENT = None
-    CLOUDFLARE_CRITICAL_THRESHOLD_PERCENT = None
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_FALKORDB_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
 
-# HTTP Server Configuration
-HTTP_ENABLED = os.getenv('MCP_HTTP_ENABLED', 'false').lower() == 'true'
-HTTP_PORT = safe_get_int_env('MCP_HTTP_PORT', 8000, min_value=1024, max_value=65535)  # Non-privileged ports only
-HTTP_HOST = os.getenv('MCP_HTTP_HOST', '0.0.0.0')
-CORS_ORIGINS = os.getenv('MCP_CORS_ORIGINS', '*').split(',')
-SSE_HEARTBEAT_INTERVAL = safe_get_int_env('MCP_SSE_HEARTBEAT', 30, min_value=5, max_value=300)  # 5 seconds to 5 minutes
-API_KEY = os.getenv('MCP_API_KEY', None)  # Optional authentication
+    # Connection
+    host: str = Field(default="localhost", description="FalkorDB host (runs on Redis protocol)")
+    port: int = Field(default=6379, ge=1, le=65535, description="FalkorDB port")
+    password: SecretStr | None = Field(default=None, description="FalkorDB/Redis password")
 
-# HTTPS Configuration
-HTTPS_ENABLED = os.getenv('MCP_HTTPS_ENABLED', 'false').lower() == 'true'
-SSL_CERT_FILE = os.getenv('MCP_SSL_CERT_FILE', None)
-SSL_KEY_FILE = os.getenv('MCP_SSL_KEY_FILE', None)
+    # Graph
+    graph_name: str = Field(default="memory_graph", description="Name of the graph within FalkorDB")
 
-# mDNS Service Discovery Configuration
-MDNS_ENABLED = os.getenv('MCP_MDNS_ENABLED', 'true').lower() == 'true'
-MDNS_SERVICE_NAME = os.getenv('MCP_MDNS_SERVICE_NAME', 'MCP Memory Service')
-MDNS_SERVICE_TYPE = os.getenv('MCP_MDNS_SERVICE_TYPE', '_mcp-memory._tcp.local.')
-MDNS_DISCOVERY_TIMEOUT = int(os.getenv('MCP_MDNS_DISCOVERY_TIMEOUT', '5'))
+    # CQRS write queue (uses Redis LPUSH/BRPOP on the same FalkorDB instance)
+    write_queue_key: str = Field(default="mcp:graph:write_queue", description="Redis key for Hebbian write queue")
+    write_queue_batch_size: int = Field(default=50, ge=1, le=500, description="Max edges to process per consumer tick")
+    write_queue_poll_interval: float = Field(
+        default=0.5, ge=0.1, le=10.0, description="Seconds between BRPOP polls when queue is empty"
+    )
 
-# Database path for HTTP interface (use SQLite-vec by default)
-if (STORAGE_BACKEND in ['sqlite_vec', 'hybrid']) and SQLITE_VEC_PATH:
-    DATABASE_PATH = SQLITE_VEC_PATH
-else:
-    # Fallback to a default SQLite-vec path for HTTP interface
-    DATABASE_PATH = os.path.join(BASE_DIR, 'memory_http.db')
+    # Connection pool
+    max_connections: int = Field(default=16, ge=1, le=128, description="Max connections in Redis pool (for concurrent reads)")
 
-# Embedding model configuration
-EMBEDDING_MODEL_NAME = os.getenv('MCP_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+    # Hebbian learning parameters
+    hebbian_initial_weight: float = Field(default=0.1, ge=0.01, le=1.0, description="Initial weight for new Hebbian edges")
+    hebbian_strengthen_rate: float = Field(
+        default=0.15,
+        ge=0.01,
+        le=1.0,
+        description="Multiplicative strengthen rate per co-access (w *= 1 + rate)",
+    )
+    hebbian_max_weight: float = Field(default=1.0, ge=0.1, le=10.0, description="Maximum Hebbian edge weight")
+
+    # Spreading activation parameters
+    spreading_activation_max_hops: int = Field(default=2, ge=1, le=3, description="Max BFS hops for spreading activation")
+    spreading_activation_decay: float = Field(
+        default=0.5, ge=0.01, le=1.0, description="Per-hop exponential decay factor (activation *= decay^hops)"
+    )
+    spreading_activation_boost: float = Field(
+        default=0.2, ge=0.0, le=1.0, description="Weight of graph activation boost on vector scores"
+    )
+    spreading_activation_min_activation: float = Field(
+        default=0.01, ge=0.0, le=1.0, description="Minimum activation threshold to consider a neighbor"
+    )
+
+    # Hebbian-weighted search boost (within-result co-access signal)
+    hebbian_boost: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Max boost from Hebbian co-access edges between search results (0=disabled)",
+    )
+
+    # Feature flag
+    enabled: bool = Field(default=False, description="Enable FalkorDB graph layer")
+
+
+class ConsolidationSettings(BaseSettings):
+    """Memory consolidation configuration for periodic pruning and strengthening."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_CONSOLIDATION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    decay_factor: float = Field(
+        default=0.9,
+        ge=0.01,
+        le=0.99,
+        description="Global edge weight decay per consolidation run (synaptic homeostasis)",
+    )
+    prune_threshold: float = Field(
+        default=0.05,
+        ge=0.001,
+        le=0.5,
+        description="Delete edges with weight below this after decay",
+    )
+    stale_edge_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Edges not co-accessed within this many days are candidates for extra decay",
+    )
+    stale_decay_factor: float = Field(
+        default=0.5,
+        ge=0.01,
+        le=0.99,
+        description="Additional decay applied to stale edges (on top of global decay)",
+    )
+    max_edges_per_run: int = Field(
+        default=10000,
+        ge=100,
+        le=100000,
+        description="Maximum edges to process per consolidation run (safety limit)",
+    )
+    duplicate_similarity_threshold: float = Field(
+        default=0.95,
+        ge=0.8,
+        le=1.0,
+        description="Cosine similarity above which memories are considered duplicates",
+    )
+    max_duplicates_per_run: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Maximum duplicate pairs to merge per run",
+    )
+
+
+class InterferenceSettings(BaseSettings):
+    """Proactive interference and contradiction detection configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_INTERFERENCE_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable contradiction detection at store time")
+
+    similarity_threshold: float = Field(
+        default=0.7,
+        ge=0.5,
+        le=0.95,
+        description="Minimum cosine similarity to consider a memory as potentially contradictory",
+    )
+    min_confidence: float = Field(
+        default=0.3,
+        ge=0.1,
+        le=0.9,
+        description="Minimum confidence for a contradiction signal to be reported",
+    )
+    max_candidates: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum similar memories to check for contradictions per store",
+    )
+
+
+class CrossReferencingSettings(BaseSettings):
+    """Automatic cross-referencing configuration.
+
+    At store time, finds semantically related memories and creates RELATES_TO
+    edges between them. Complements interference detection: interference creates
+    CONTRADICTS edges for opposing memories; cross-referencing creates RELATES_TO
+    edges for related-but-not-contradictory ones.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_CROSS_REF_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable automatic RELATES_TO edge creation at store time")
+
+    similarity_threshold: float = Field(
+        default=0.5,
+        ge=0.3,
+        le=0.9,
+        description="Minimum cosine similarity to consider a memory as a cross-reference candidate",
+    )
+    max_candidates: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum similar memories to check for cross-references per store",
+    )
+
+
+class SalienceSettings(BaseSettings):
+    """Salience scoring configuration for emotional tagging and retrieval boosting."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_SALIENCE_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable emotional tagging and salience scoring")
+
+    # Salience computation weights (must sum to ~1.0 for interpretability)
+    emotional_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for emotional magnitude in salience score")
+    frequency_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for access frequency in salience score")
+    importance_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for explicit importance in salience score")
+
+    # Retrieval boost
+    boost_weight: float = Field(
+        default=0.15, ge=0.0, le=1.0, description="Max salience boost on retrieval scores (0.15 = up to +15%)"
+    )
+
+
+class SpacedRepetitionSettings(BaseSettings):
+    """Spaced repetition and adaptive LTP configuration.
+
+    Implements two neuroscience-inspired memory strengthening mechanisms:
+
+    1. Spacing effect: Memories accessed at increasing intervals receive stronger
+       retrieval boosts than those accessed in rapid bursts (Ebbinghaus, 1885).
+    2. Adaptive LTP: Hebbian edge strengthening rate decreases as edge weight
+       approaches maximum, preventing runaway potentiation (BCM theory).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_SPACED_REPETITION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable spaced repetition and adaptive LTP")
+
+    boost_weight: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Max spacing quality boost on retrieval scores (0.1 = up to +10%)",
+    )
+
+    max_timestamps: int = Field(
+        default=20,
+        ge=5,
+        le=100,
+        description="Maximum access timestamps to retain per memory (ring buffer)",
+    )
+
+
+class EncodingContextSettings(BaseSettings):
+    """Encoding context capture and context-dependent retrieval configuration.
+
+    Implements the encoding specificity principle (Tulving & Thomson, 1973):
+    memories encoded in a particular context are retrieved more effectively
+    when that same context is present at retrieval time.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_ENCODING_CONTEXT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable encoding context capture and context-dependent retrieval")
+
+    boost_weight: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Max context similarity boost on retrieval scores (0.1 = up to +10%)",
+    )
+
+
+class ThreeTierSettings(BaseSettings):
+    """Three-tier memory model configuration (Cowan's embedded-processes model).
+
+    Controls the sensory buffer and working memory tiers.
+    Long-term memory (tier 3) is the existing Qdrant storage.
+    Both tiers are in-process and session-scoped — not persisted.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_THREE_TIER_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable three-tier memory model")
+
+    sensory_capacity: int = Field(default=7, ge=1, le=50, description="Sensory buffer capacity (Miller's magic number)")
+    sensory_decay_ms: int = Field(default=1000, ge=100, le=30000, description="Sensory buffer item TTL in milliseconds")
+
+    working_capacity: int = Field(default=4, ge=1, le=20, description="Working memory capacity (Cowan's limit)")
+    working_decay_minutes: float = Field(default=30.0, ge=1.0, le=1440.0, description="Working memory item decay in minutes")
+
+    auto_consolidate: bool = Field(
+        default=True, description="Automatically consolidate working memory items to LTM on access threshold"
+    )
+
+    expose_tools: bool = Field(default=False, description="Expose three-tier memory as MCP tools (for autonomous agent rigs)")
+
+
+class TOONSettings(BaseSettings):
+    """TOON format encoding configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    enable_toon_format: bool = Field(default=True, description="Enable TOON format encoding (emergency kill switch)")
+
+    log_token_savings: bool = Field(default=False, description="Log token savings metrics during TOON encoding")
+
+
+class DebugSettings(BaseSettings):
+    """Debug and development configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_MEMORY_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    expose_debug_tools: bool = Field(default=False)
+    include_hostname: bool = Field(default=False)
+    latency_metrics: bool = Field(
+        default=False,
+        description="Include latency_ms in tool responses. Enable via MCP_MEMORY_LATENCY_METRICS=true.",
+    )
+
+
+class HybridSearchSettings(BaseSettings):
+    """Hybrid search configuration for combining vector and tag search."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_MEMORY_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    hybrid_alpha: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Weight for vector vs tag results (0=tags only, 1=vector only, None=adaptive)"
+    )
+
+    recency_decay: float = Field(
+        default=0.01, ge=0.0, description="Exponential decay rate for recency boost (0=disabled, 0.01=~70 day half-life)"
+    )
+
+    temporal_decay_lambda: float = Field(
+        default=0.0, ge=0.0, description="Temporal decay rate (0=disabled, 0.01=~69-day half-life)"
+    )
+
+    temporal_decay_base: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Minimum relevance floor for temporal decay (0.7=70% retention)"
+    )
+
+    adaptive_threshold_small: int = Field(default=500, ge=1, description="Corpus size below which alpha=0.5 (balanced)")
+
+    adaptive_threshold_large: int = Field(default=5000, ge=1, description="Corpus size above which alpha=0.8 (strong semantic)")
+
+
+class QueryIntentSettings(BaseSettings):
+    """Query intent inference configuration for concept extraction and fan-out."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_INTENT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # Master switch
+    enabled: bool = Field(default=True, description="Enable query intent inference and fan-out")
+
+    # NLP concept extraction
+    spacy_model: str = Field(default="en_core_web_sm", description="spaCy model for concept extraction")
+    max_sub_queries: int = Field(default=4, ge=1, le=8, description="Maximum sub-queries from concept extraction")
+    min_query_tokens: int = Field(
+        default=3, ge=1, description="Minimum meaningful tokens to trigger fan-out (shorter queries use single-vector)"
+    )
+
+    # Graph injection
+    graph_inject: bool = Field(default=True, description="Inject graph neighbors into candidate pool")
+    graph_inject_limit: int = Field(default=10, ge=1, le=50, description="Maximum graph-injected neighbors")
+    graph_inject_min_activation: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="Minimum spreading activation score for injection"
+    )
+
+    # LLM re-ranking (off by default)
+    llm_rerank: bool = Field(default=False, description="Enable LLM-based re-ranking of results")
+    llm_provider: str = Field(default="anthropic", description="LLM provider for re-ranking")
+    llm_model: str = Field(default="claude-haiku-4-5-20251001", description="LLM model for re-ranking")
+    llm_timeout_ms: int = Field(default=2000, ge=500, le=10000, description="LLM re-ranking timeout in milliseconds")
+
+
+class SemanticTagSettings(BaseSettings):
+    """Semantic tag matching configuration for k-NN tag embedding search."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_SEMANTIC_TAG_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable semantic tag matching via embedding k-NN")
+    similarity_threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Minimum cosine similarity to consider a tag match"
+    )
+    max_tags: int = Field(default=10, ge=1, le=50, description="Maximum semantically matched tags to fan out")
+    cache_ttl: int = Field(default=3600, ge=60, description="Tag embedding cache TTL in seconds")
+
+
+class SummarySettings(BaseSettings):
+    """Summary generation configuration for memory_scan and store operations."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_SUMMARY_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    mode: str | None = Field(
+        default=None,
+        description="Summary mode: 'extractive' or 'llm' (auto-detect: llm if API key present, else extractive)",
+    )
+
+    provider: str = Field(
+        default="anthropic",
+        description="LLM provider: 'anthropic' or 'gemini'",
+        pattern="^(anthropic|gemini)$",
+    )
+
+    # Anthropic settings
+    anthropic_base_url: str = Field(
+        default="https://api.anthropic.com",
+        description="Anthropic API base URL (use proxy URL for load balancing)",
+    )
+
+    anthropic_api_key: SecretStr | None = Field(
+        default=None,
+        description="Anthropic API key (ignored if using proxy)",
+    )
+
+    anthropic_model_small: str = Field(
+        default="claude-3-5-haiku-20241022",
+        description="Anthropic model for short memories (<500 chars)",
+    )
+
+    anthropic_model_large: str = Field(
+        default="claude-3-5-sonnet-20241022",
+        description="Anthropic model for long memories (≥500 chars)",
+    )
+
+    anthropic_size_threshold: int = Field(
+        default=500,
+        ge=100,
+        le=2000,
+        description="Character count threshold for switching from small to large model",
+    )
+
+    # Gemini settings (legacy)
+    model: str = Field(default="gemini-2.5-flash", description="Gemini model identifier for summary generation")
+
+    api_key: SecretStr | None = Field(default=None, description="API key for Gemini provider")
+
+    max_tokens: int = Field(default=50, ge=10, le=200, description="Maximum output tokens for LLM-generated summaries")
+
+    timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0, description="HTTP request timeout for LLM API calls")
+
+    def get_effective_mode(self) -> str:
+        """Determine effective summary mode based on configuration.
+
+        Anthropic provider allows API key to be None when using a proxy.
+        Gemini provider requires an API key.
+
+        Returns:
+            'llm' if mode is explicitly 'llm' and provider is configured, else 'extractive'.
+        """
+        if self.mode == "llm":
+            # Anthropic allows no API key (proxy injects auth)
+            if self.provider == "anthropic":
+                return "llm"
+            elif self.provider == "gemini" and self.api_key:
+                return "llm"
+            else:
+                return "extractive"
+        elif self.mode == "extractive":
+            return "extractive"
+        elif self.mode is None:
+            # Auto-detect: Anthropic needs base_url set, Gemini needs API key
+            if self.provider == "anthropic" and (
+                self.anthropic_api_key or self.anthropic_base_url != "https://api.anthropic.com"
+            ):
+                return "llm"
+            elif self.provider == "gemini" and self.api_key:
+                return "llm"
+            else:
+                return "extractive"
+        else:
+            # Fallback to extractive for any other case
+            return "extractive"
+
+
+class EmbeddingSettings(BaseSettings):
+    """Embedding provider configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_EMBEDDING_", env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    provider: Literal["local", "openai_compat"] = Field(
+        default="local", description="Embedding provider type (local | openai_compat)"
+    )
+    url: str | None = Field(default=None, description="Base URL for HTTP embedding provider")
+    timeout: int = Field(default=30, ge=1, le=300, description="Request timeout in seconds")
+    max_batch: int = Field(default=64, ge=1, le=1024, description="Max texts per batch request")
+    dimensions: int | None = Field(default=None, description="Embedding dimensions (auto-detected from model if None)")
+    tls_verify: bool = Field(default=True, description="TLS certificate verification for HTTP provider")
+    api_key: SecretStr | None = Field(default=None, description="API key for managed providers")
+    prompt_name_map: dict[str, dict[str, str]] | None = Field(default=None, description="Custom prompt name mappings")
+
 
 # =============================================================================
-# Document Processing Configuration (Semtools Integration)
+# Main Settings Class
 # =============================================================================
 
-# Semtools configuration for enhanced document parsing
-# LlamaParse API key for advanced OCR and table extraction
-LLAMAPARSE_API_KEY = os.getenv('LLAMAPARSE_API_KEY', None)
 
-# Document chunking configuration
-DOCUMENT_CHUNK_SIZE = safe_get_int_env('MCP_DOCUMENT_CHUNK_SIZE', 1000, min_value=100, max_value=10000)
-DOCUMENT_CHUNK_OVERLAP = safe_get_int_env('MCP_DOCUMENT_CHUNK_OVERLAP', 200, min_value=0, max_value=1000)
+class Settings(BaseSettings):
+    """
+    Main MCP Memory Service settings.
 
-# Log semtools configuration
-if LLAMAPARSE_API_KEY:
-    logger.info("LlamaParse API key configured - enhanced document parsing available")
-else:
-    logger.debug("LlamaParse API key not set - semtools will use basic parsing mode")
+    Combines all configuration sections into a single, validated settings object.
+    Automatically loads from .env file and environment variables.
+    """
 
-logger.info(f"Document chunking: size={DOCUMENT_CHUNK_SIZE}, overlap={DOCUMENT_CHUNK_OVERLAP}")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore", validate_default=True
+    )
+
+    # Nested settings
+    paths: PathSettings = Field(default_factory=PathSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
+    content_limits: ContentLimitsSettings = Field(default_factory=ContentLimitsSettings)
+    qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    falkordb: FalkorDBSettings = Field(default_factory=FalkorDBSettings)
+    http: HTTPSettings = Field(default_factory=HTTPSettings)
+    oauth: OAuthSettings = Field(default_factory=OAuthSettings)
+    consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)
+    interference: InterferenceSettings = Field(default_factory=InterferenceSettings)
+    cross_referencing: CrossReferencingSettings = Field(default_factory=CrossReferencingSettings)
+    salience: SalienceSettings = Field(default_factory=SalienceSettings)
+    spaced_repetition: SpacedRepetitionSettings = Field(default_factory=SpacedRepetitionSettings)
+    encoding_context: EncodingContextSettings = Field(default_factory=EncodingContextSettings)
+    three_tier: ThreeTierSettings = Field(default_factory=ThreeTierSettings)
+    toon: TOONSettings = Field(default_factory=TOONSettings)
+    debug: DebugSettings = Field(default_factory=DebugSettings)
+    hybrid_search: HybridSearchSettings = Field(default_factory=HybridSearchSettings)
+    intent: QueryIntentSettings = Field(default_factory=QueryIntentSettings)
+    semantic_tag: SemanticTagSettings = Field(default_factory=SemanticTagSettings)
+    summary: SummarySettings = Field(default_factory=SummarySettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+
+    @model_validator(mode="after")
+    def validate_backend_requirements(self) -> "Settings":
+        """Validate that required backend configuration is present."""
+        # Set OAuth issuer if not provided
+        if self.oauth.enabled and not self.oauth.issuer:
+            scheme = "https" if self.http.https_enabled else "http"
+            host = "localhost" if self.http.http_host == "0.0.0.0" else self.http.http_host
+            port = self.http.http_port
+
+            if (scheme == "https" and port != 443) or (scheme == "http" and port != 80):
+                self.oauth.issuer = f"{scheme}://{host}:{port}"
+            else:
+                self.oauth.issuer = f"{scheme}://{host}"
+
+            logger.info(f"Auto-configured OAuth issuer: {self.oauth.issuer}")
+
+        return self
+
+    def log_configuration(self):
+        """Log current configuration (excluding secrets)."""
+        logger.info("=" * 80)
+        logger.info("MCP Memory Service Configuration")
+        logger.info("=" * 80)
+        logger.info(f"Server: {self.server.name} v{self.server.version}")
+        logger.info("Storage Backend: Qdrant")
+        logger.info(f"Base Directory: {self.paths.base_dir}")
+
+        if self.qdrant.url:
+            logger.info(f"Qdrant URL: {self.qdrant.url}")
+        else:
+            logger.info(f"Qdrant Storage: {self.qdrant.storage_path}")
+
+        if self.http.http_enabled:
+            logger.info(f"HTTP Server: {self.http.http_host}:{self.http.http_port}")
+            logger.info(f"HTTPS: {self.http.https_enabled}")
+
+        if self.oauth.enabled:
+            logger.info(f"OAuth: enabled (algorithm={self.oauth.get_jwt_algorithm()})")
+
+        logger.info("=" * 80)
+
 
 # =============================================================================
-# End Document Processing Configuration
+# Global Settings Instance
 # =============================================================================
 
+
+class _SettingsProxy:
+    """
+    Lazy settings proxy that defers Settings instantiation until first access.
+
+    This ensures environment variables are read at runtime, not import time,
+    which is critical for Docker deployments where env vars may not be fully
+    propagated during module import.
+
+    Thread-safe: Uses double-checked locking pattern to prevent race conditions.
+    """
+
+    _instance: Settings | None = None
+    _lock: threading.Lock = threading.Lock()
+
+    def _get_instance(self) -> Settings:
+        """Get or create the Settings instance in a thread-safe manner."""
+        if self._instance is None:
+            with self._lock:
+                # Double-check after acquiring lock
+                if self._instance is None:
+                    self._instance = Settings()
+                    self._instance.log_configuration()
+        return self._instance
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_instance(), name)
+
+
+# Create lazy proxy
+settings = _SettingsProxy()
+
 # =============================================================================
-# Automatic Backup Configuration
+# Backward Compatibility Exports
+# =============================================================================
+# Export top-level variables for existing code compatibility
+# These now use __getattr__ to defer evaluation until runtime
+
+
+def __getattr__(name: str):
+    """
+    Module-level __getattr__ to provide lazy config value access.
+
+    This is called when a module attribute is not found via normal lookup,
+    allowing us to defer Settings instantiation until the value is actually needed.
+    """
+    # Get settings instance (thread-safe lazy-loading)
+    _settings = settings._get_instance()
+
+    # Map attribute names to settings paths
+    # This provides lazy evaluation - settings are only loaded when first accessed
+    mapping = {
+        # Paths
+        "BASE_DIR": lambda: _settings.paths.base_dir,
+        "BACKUPS_PATH": lambda: _settings.paths.backups_path,
+        # Server
+        "SERVER_NAME": lambda: _settings.server.name,
+        "SERVER_VERSION": lambda: _settings.server.version,
+        # Storage
+        "EMBEDDING_MODEL_NAME": lambda: _settings.storage.embedding_model,
+        "USE_ONNX": lambda: _settings.storage.use_onnx,
+        # Content limits
+        "ENABLE_AUTO_SPLIT": lambda: _settings.content_limits.enable_auto_split,
+        "CONTENT_SPLIT_OVERLAP": lambda: _settings.content_limits.content_split_overlap,
+        "CONTENT_PRESERVE_BOUNDARIES": lambda: _settings.content_limits.content_preserve_boundaries,
+        # HTTP
+        "HTTP_ENABLED": lambda: _settings.http.http_enabled,
+        "HTTP_PORT": lambda: _settings.http.http_port,
+        "HTTP_HOST": lambda: _settings.http.http_host,
+        "HTTP_WORKERS": lambda: _settings.http.http_workers,
+        "CORS_ORIGINS": lambda: _settings.http.cors_origins,
+        "SSE_HEARTBEAT_INTERVAL": lambda: _settings.http.sse_heartbeat,
+        "API_KEY": lambda: _settings.http.api_key.get_secret_value() if _settings.http.api_key else None,
+        "HTTPS_ENABLED": lambda: _settings.http.https_enabled,
+        "SSL_CERT_FILE": lambda: _settings.http.ssl_cert_file,
+        "SSL_KEY_FILE": lambda: _settings.http.ssl_key_file,
+        "MDNS_ENABLED": lambda: _settings.http.mdns_enabled,
+        # OAuth
+        "OAUTH_ENABLED": lambda: _settings.oauth.enabled,
+        "OAUTH_PRIVATE_KEY": lambda: _settings.oauth.private_key.get_secret_value() if _settings.oauth.private_key else None,
+        "OAUTH_PUBLIC_KEY": lambda: _settings.oauth.public_key,
+        "OAUTH_SECRET_KEY": lambda: _settings.oauth.secret_key.get_secret_value() if _settings.oauth.secret_key else None,
+        "OAUTH_ISSUER": lambda: _settings.oauth.issuer,
+        "OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES": lambda: _settings.oauth.access_token_expire_minutes,
+        "OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES": lambda: _settings.oauth.authorization_code_expire_minutes,
+        "ALLOW_ANONYMOUS_ACCESS": lambda: _settings.oauth.allow_anonymous_access,
+        # TOON
+        "ENABLE_TOON_FORMAT": lambda: _settings.toon.enable_toon_format,
+        "LOG_TOKEN_SAVINGS": lambda: _settings.toon.log_token_savings,
+        # Debug
+        "EXPOSE_DEBUG_TOOLS": lambda: _settings.debug.expose_debug_tools,
+        "INCLUDE_HOSTNAME": lambda: _settings.debug.include_hostname,
+        # Hybrid Search
+        "HYBRID_ALPHA": lambda: _settings.hybrid_search.hybrid_alpha,
+        "RECENCY_DECAY": lambda: _settings.hybrid_search.recency_decay,
+        # ONNX - uses lazy cache creation
+        "ONNX_MODEL_CACHE": lambda: _ensure_onnx_cache(),
+    }
+
+    if name in mapping:
+        return mapping[name]()
+
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+# Note: All config values are now lazy-loaded via __getattr__ above
+# Do not add assignments here - they will trigger eager Settings() instantiation
+
+# =============================================================================
+# Helper Functions
 # =============================================================================
 
-BACKUP_ENABLED = safe_get_bool_env('MCP_BACKUP_ENABLED', True)
-BACKUP_INTERVAL = os.getenv('MCP_BACKUP_INTERVAL', 'daily').lower()  # 'hourly', 'daily', 'weekly'
-BACKUP_RETENTION = safe_get_int_env('MCP_BACKUP_RETENTION', 7, min_value=1, max_value=365)  # days
-BACKUP_MAX_COUNT = safe_get_int_env('MCP_BACKUP_MAX_COUNT', 10, min_value=1, max_value=100)  # max backups to keep
 
-# Validate backup interval
-if BACKUP_INTERVAL not in ['hourly', 'daily', 'weekly']:
-    logger.warning(f"Invalid backup interval: {BACKUP_INTERVAL}, falling back to 'daily'")
-    BACKUP_INTERVAL = 'daily'
-
-logger.info(f"Backup configuration: enabled={BACKUP_ENABLED}, interval={BACKUP_INTERVAL}, retention={BACKUP_RETENTION} days")
-
-# =============================================================================
-# End Automatic Backup Configuration
-# =============================================================================
-
-# Dream-inspired consolidation configuration
-CONSOLIDATION_ENABLED = os.getenv('MCP_CONSOLIDATION_ENABLED', 'false').lower() == 'true'
-
-# Machine identification configuration
-INCLUDE_HOSTNAME = os.getenv('MCP_MEMORY_INCLUDE_HOSTNAME', 'false').lower() == 'true'
-
-# Consolidation archive location
-consolidation_archive_path = None
-for env_var in ['MCP_CONSOLIDATION_ARCHIVE_PATH', 'MCP_MEMORY_ARCHIVE_PATH']:
-    if path := os.getenv(env_var):
-        consolidation_archive_path = path
-        logger.info(f"Using {env_var}={path} for consolidation archive path")
-        break
-
-if not consolidation_archive_path:
-    consolidation_archive_path = os.path.join(BASE_DIR, 'consolidation_archive')
-    logger.info(f"No consolidation archive path environment variable found, using default: {consolidation_archive_path}")
-
-try:
-    CONSOLIDATION_ARCHIVE_PATH = validate_and_create_path(consolidation_archive_path)
-    logger.info(f"Using consolidation archive path: {CONSOLIDATION_ARCHIVE_PATH}")
-except Exception as e:
-    logger.error(f"Error creating consolidation archive path: {e}")
-    CONSOLIDATION_ARCHIVE_PATH = None
-
-# Consolidation settings with environment variable overrides
-CONSOLIDATION_CONFIG = {
-    # Decay settings
-    'decay_enabled': os.getenv('MCP_DECAY_ENABLED', 'true').lower() == 'true',
-    'retention_periods': {
-        'critical': int(os.getenv('MCP_RETENTION_CRITICAL', '365')),
-        'reference': int(os.getenv('MCP_RETENTION_REFERENCE', '180')),
-        'standard': int(os.getenv('MCP_RETENTION_STANDARD', '30')),
-        'temporary': int(os.getenv('MCP_RETENTION_TEMPORARY', '7'))
-    },
-    
-    # Association settings
-    'associations_enabled': os.getenv('MCP_ASSOCIATIONS_ENABLED', 'true').lower() == 'true',
-    'min_similarity': float(os.getenv('MCP_ASSOCIATION_MIN_SIMILARITY', '0.3')),
-    'max_similarity': float(os.getenv('MCP_ASSOCIATION_MAX_SIMILARITY', '0.7')),
-    'max_pairs_per_run': int(os.getenv('MCP_ASSOCIATION_MAX_PAIRS', '100')),
-    
-    # Clustering settings
-    'clustering_enabled': os.getenv('MCP_CLUSTERING_ENABLED', 'true').lower() == 'true',
-    'min_cluster_size': int(os.getenv('MCP_CLUSTERING_MIN_SIZE', '5')),
-    'clustering_algorithm': os.getenv('MCP_CLUSTERING_ALGORITHM', 'dbscan'),  # 'dbscan', 'hierarchical', 'simple'
-    
-    # Compression settings
-    'compression_enabled': os.getenv('MCP_COMPRESSION_ENABLED', 'true').lower() == 'true',
-    'max_summary_length': int(os.getenv('MCP_COMPRESSION_MAX_LENGTH', '500')),
-    'preserve_originals': os.getenv('MCP_COMPRESSION_PRESERVE_ORIGINALS', 'true').lower() == 'true',
-    
-    # Forgetting settings
-    'forgetting_enabled': os.getenv('MCP_FORGETTING_ENABLED', 'true').lower() == 'true',
-    'relevance_threshold': float(os.getenv('MCP_FORGETTING_RELEVANCE_THRESHOLD', '0.1')),
-    'access_threshold_days': int(os.getenv('MCP_FORGETTING_ACCESS_THRESHOLD', '90')),
-    'archive_location': CONSOLIDATION_ARCHIVE_PATH,
-
-    # Incremental consolidation settings
-    'batch_size': int(os.getenv('MCP_CONSOLIDATION_BATCH_SIZE', '500')),
-    'incremental_mode': os.getenv('MCP_CONSOLIDATION_INCREMENTAL', 'true').lower() == 'true'
-}
-
-# Consolidation scheduling settings (for APScheduler integration)
-CONSOLIDATION_SCHEDULE = {
-    'daily': os.getenv('MCP_SCHEDULE_DAILY', '02:00'),      # 2 AM daily
-    'weekly': os.getenv('MCP_SCHEDULE_WEEKLY', 'SUN 03:00'), # 3 AM on Sundays
-    'monthly': os.getenv('MCP_SCHEDULE_MONTHLY', '01 04:00'), # 4 AM on 1st of month
-    'quarterly': os.getenv('MCP_SCHEDULE_QUARTERLY', 'disabled'), # Disabled by default
-    'yearly': os.getenv('MCP_SCHEDULE_YEARLY', 'disabled')        # Disabled by default
-}
-
-logger.info(f"Consolidation enabled: {CONSOLIDATION_ENABLED}")
-if CONSOLIDATION_ENABLED:
-    logger.info(f"Consolidation configuration: {CONSOLIDATION_CONFIG}")
-    logger.info(f"Consolidation schedule: {CONSOLIDATION_SCHEDULE}")
-
-# OAuth 2.1 Configuration
-OAUTH_ENABLED = safe_get_bool_env('MCP_OAUTH_ENABLED', True)
-
-# RSA key pair configuration for JWT signing (RS256)
-# Private key for signing tokens
-OAUTH_PRIVATE_KEY = os.getenv('MCP_OAUTH_PRIVATE_KEY')
-# Public key for verifying tokens
-OAUTH_PUBLIC_KEY = os.getenv('MCP_OAUTH_PUBLIC_KEY')
-
-# Generate RSA key pair if not provided
-if not OAUTH_PRIVATE_KEY or not OAUTH_PUBLIC_KEY:
-    try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.backends import default_backend
-
-        # Generate 2048-bit RSA key pair
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-            backend=default_backend()
-        )
-
-        # Serialize private key to PEM format
-        OAUTH_PRIVATE_KEY = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ).decode('utf-8')
-
-        # Serialize public key to PEM format
-        public_key = private_key.public_key()
-        OAUTH_PUBLIC_KEY = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
-
-        logger.info("Generated RSA key pair for OAuth JWT signing (set MCP_OAUTH_PRIVATE_KEY and MCP_OAUTH_PUBLIC_KEY for persistence)")
-
-    except ImportError:
-        logger.warning("cryptography package not available, falling back to HS256 symmetric key")
-        # Fallback to symmetric key for HS256
-        OAUTH_SECRET_KEY = os.getenv('MCP_OAUTH_SECRET_KEY')
-        if not OAUTH_SECRET_KEY:
-            OAUTH_SECRET_KEY = secrets.token_urlsafe(32)
-            logger.info("Generated random OAuth secret key (set MCP_OAUTH_SECRET_KEY for persistence)")
-        OAUTH_PRIVATE_KEY = None
-        OAUTH_PUBLIC_KEY = None
-
-# JWT algorithm and key helper functions
 def get_jwt_algorithm() -> str:
-    """Get the JWT algorithm to use based on available keys."""
-    return "RS256" if OAUTH_PRIVATE_KEY and OAUTH_PUBLIC_KEY else "HS256"
+    """Get JWT algorithm from settings."""
+    return settings.oauth.get_jwt_algorithm()
+
 
 def get_jwt_signing_key() -> str:
-    """Get the appropriate key for JWT signing."""
-    if OAUTH_PRIVATE_KEY and OAUTH_PUBLIC_KEY:
-        return OAUTH_PRIVATE_KEY
-    elif hasattr(globals(), 'OAUTH_SECRET_KEY'):
-        return OAUTH_SECRET_KEY
-    else:
-        raise ValueError("No JWT signing key available")
+    """Get JWT signing key from settings."""
+    return settings.oauth.get_jwt_signing_key()
+
 
 def get_jwt_verification_key() -> str:
-    """Get the appropriate key for JWT verification."""
-    if OAUTH_PRIVATE_KEY and OAUTH_PUBLIC_KEY:
-        return OAUTH_PUBLIC_KEY
-    elif hasattr(globals(), 'OAUTH_SECRET_KEY'):
-        return OAUTH_SECRET_KEY
-    else:
-        raise ValueError("No JWT verification key available")
+    """Get JWT verification key from settings."""
+    return settings.oauth.get_jwt_verification_key()
+
+
+def get_oauth_issuer() -> str:
+    """Get OAuth issuer URL from settings."""
+    _settings = settings._get_instance()
+    return _settings.oauth.issuer
+
 
 def validate_oauth_configuration() -> None:
-    """
-    Validate OAuth configuration at startup.
+    """Validate OAuth configuration at startup."""
+    _settings = settings._get_instance()
 
-    Raises:
-        ValueError: If OAuth configuration is invalid
-    """
-    if not OAUTH_ENABLED:
+    if not _settings.oauth.enabled:
         logger.info("OAuth validation skipped: OAuth disabled")
         return
 
     errors = []
     warnings = []
 
+    oauth_issuer = _settings.oauth.issuer
+    oauth_access_token_exp = _settings.oauth.access_token_expire_minutes
+    oauth_auth_code_exp = _settings.oauth.authorization_code_expire_minutes
+    allow_anon = _settings.oauth.allow_anonymous_access
+
     # Validate issuer URL
-    if not OAUTH_ISSUER:
+    if not oauth_issuer:
         errors.append("OAuth issuer URL is not configured")
-    elif not OAUTH_ISSUER.startswith(('http://', 'https://')):
-        errors.append(f"OAuth issuer URL must start with http:// or https://: {OAUTH_ISSUER}")
+    elif not oauth_issuer.startswith(("http://", "https://")):
+        errors.append(f"OAuth issuer URL must start with http:// or https://: {oauth_issuer}")
 
-    # Validate JWT configuration
-    try:
-        algorithm = get_jwt_algorithm()
-        logger.debug(f"OAuth JWT algorithm validation: {algorithm}")
+    # Validate token expiry
+    if oauth_access_token_exp <= 0:
+        errors.append(f"Access token expiry must be positive: {oauth_access_token_exp}")
+    elif oauth_access_token_exp > 1440:
+        warnings.append(f"Access token expiry is very long: {oauth_access_token_exp} minutes")
 
-        # Test key access
-        signing_key = get_jwt_signing_key()
-        verification_key = get_jwt_verification_key()
+    if oauth_auth_code_exp <= 0:
+        errors.append(f"Authorization code expiry must be positive: {oauth_auth_code_exp}")
+    elif oauth_auth_code_exp > 60:
+        warnings.append(f"Authorization code expiry is longer than recommended: {oauth_auth_code_exp} minutes")
 
-        if algorithm == "RS256":
-            if not OAUTH_PRIVATE_KEY or not OAUTH_PUBLIC_KEY:
-                errors.append("RS256 algorithm selected but RSA keys are missing")
-            elif len(signing_key) < 100:  # Basic length check for PEM format
-                warnings.append("RSA private key appears to be too short")
-        elif algorithm == "HS256":
-            if not hasattr(globals(), 'OAUTH_SECRET_KEY') or not OAUTH_SECRET_KEY:
-                errors.append("HS256 algorithm selected but secret key is missing")
-            elif len(signing_key) < 32:  # Basic length check for symmetric key
-                warnings.append("OAuth secret key is shorter than recommended (32+ characters)")
+    # Security warnings
+    if oauth_issuer and ("localhost" in oauth_issuer or "127.0.0.1" in oauth_issuer):
+        warnings.append("OAuth issuer contains localhost/127.0.0.1")
 
-    except Exception as e:
-        errors.append(f"JWT configuration error: {e}")
+    if allow_anon:
+        warnings.append("Anonymous access enabled")
 
-    # Validate token expiry settings
-    if OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
-        errors.append(f"OAuth access token expiry must be positive: {OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES}")
-    elif OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES > 1440:  # 24 hours
-        warnings.append(f"OAuth access token expiry is very long: {OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES} minutes")
+    if oauth_issuer and oauth_issuer.startswith("http://") and not ("localhost" in oauth_issuer or "127.0.0.1" in oauth_issuer):
+        warnings.append("OAuth issuer uses HTTP - use HTTPS for production")
 
-    if OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES <= 0:
-        errors.append(f"OAuth authorization code expiry must be positive: {OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES}")
-    elif OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES > 60:  # 1 hour
-        warnings.append(f"OAuth authorization code expiry is longer than recommended: {OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES} minutes")
-
-    # Validate security settings
-    if "localhost" in OAUTH_ISSUER or "127.0.0.1" in OAUTH_ISSUER:
-        if not os.getenv('MCP_OAUTH_ISSUER'):
-            warnings.append("OAuth issuer contains localhost/127.0.0.1. For production, set MCP_OAUTH_ISSUER to external URL")
-
-    # Check for production readiness
-    if ALLOW_ANONYMOUS_ACCESS:
-        warnings.append("Anonymous access is enabled - consider disabling for production")
-
-    # Check for insecure transport in production
-    if OAUTH_ISSUER.startswith('http://') and not ("localhost" in OAUTH_ISSUER or "127.0.0.1" in OAUTH_ISSUER):
-        warnings.append("OAuth issuer uses HTTP (non-encrypted) transport - use HTTPS for production")
-
-    # Check for weak algorithm in production environments
-    if get_jwt_algorithm() == "HS256" and not os.getenv('MCP_OAUTH_SECRET_KEY'):
-        warnings.append("Using auto-generated HS256 secret key - set MCP_OAUTH_SECRET_KEY for production")
-
-    # Log validation results
     if errors:
         error_msg = "OAuth configuration validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
         logger.error(error_msg)
@@ -833,153 +1156,17 @@ def validate_oauth_configuration() -> None:
 
     logger.info("OAuth configuration validation successful")
 
-# OAuth server configuration
-def get_oauth_issuer() -> str:
+
+def _ensure_onnx_cache() -> str:
     """
-    Get the OAuth issuer URL based on server configuration.
+    Ensure ONNX model cache directory exists if USE_ONNX is enabled.
 
-    For reverse proxy deployments, set MCP_OAUTH_ISSUER environment variable
-    to override auto-detection (e.g., "https://api.example.com").
-
-    This ensures OAuth discovery endpoints return the correct external URLs
-    that clients can actually reach, rather than internal server addresses.
+    This is called lazily only when ONNX_MODEL_CACHE is accessed.
+    Returns the cache directory path.
     """
-    scheme = "https" if HTTPS_ENABLED else "http"
-    host = "localhost" if HTTP_HOST == "0.0.0.0" else HTTP_HOST
-
-    # Only include port if it's not the standard port for the scheme
-    if (scheme == "https" and HTTP_PORT != 443) or (scheme == "http" and HTTP_PORT != 80):
-        return f"{scheme}://{host}:{HTTP_PORT}"
-    else:
-        return f"{scheme}://{host}"
-
-# OAuth issuer URL - CRITICAL for reverse proxy deployments
-# Production: Set MCP_OAUTH_ISSUER to external URL (e.g., "https://api.example.com")
-# Development: Auto-detects from server configuration
-OAUTH_ISSUER = os.getenv('MCP_OAUTH_ISSUER') or get_oauth_issuer()
-
-# OAuth token configuration
-OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES = safe_get_int_env('MCP_OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES', 60, min_value=1, max_value=1440)  # 1 minute to 24 hours
-OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES = safe_get_int_env('MCP_OAUTH_AUTHORIZATION_CODE_EXPIRE_MINUTES', 10, min_value=1, max_value=60)  # 1 minute to 1 hour
-
-# OAuth security configuration
-ALLOW_ANONYMOUS_ACCESS = safe_get_bool_env('MCP_ALLOW_ANONYMOUS_ACCESS', False)
-
-logger.info(f"OAuth enabled: {OAUTH_ENABLED}")
-if OAUTH_ENABLED:
-    logger.info(f"OAuth issuer: {OAUTH_ISSUER}")
-    logger.info(f"OAuth JWT algorithm: {get_jwt_algorithm()}")
-    logger.info(f"OAuth access token expiry: {OAUTH_ACCESS_TOKEN_EXPIRE_MINUTES} minutes")
-    logger.info(f"Anonymous access allowed: {ALLOW_ANONYMOUS_ACCESS}")
-
-    # Warn about potential reverse proxy configuration issues
-    if not os.getenv('MCP_OAUTH_ISSUER') and ("localhost" in OAUTH_ISSUER or "127.0.0.1" in OAUTH_ISSUER):
-        logger.warning(
-            "OAuth issuer contains localhost/127.0.0.1. For reverse proxy deployments, "
-            "set MCP_OAUTH_ISSUER to the external URL (e.g., 'https://api.example.com')"
-        )
-
-    # Validate OAuth configuration at startup
-    try:
-        validate_oauth_configuration()
-    except ValueError as e:
-        logger.error(f"OAuth configuration validation failed: {e}")
-        raise
-
-# =============================================================================
-# Quality System Configuration (Memento-Inspired Quality System)
-# =============================================================================
-
-# Quality system master toggle
-MCP_QUALITY_SYSTEM_ENABLED = safe_get_bool_env('MCP_QUALITY_SYSTEM_ENABLED', True)
-
-# Quality scoring provider configuration
-# Options: 'local' (ONNX ranker), 'groq', 'gemini', 'auto' (fallback chain), 'none' (disabled)
-MCP_QUALITY_AI_PROVIDER = os.getenv('MCP_QUALITY_AI_PROVIDER', 'local').lower()
-
-# Local ONNX model configuration
-MCP_QUALITY_LOCAL_MODEL = os.getenv('MCP_QUALITY_LOCAL_MODEL', 'ms-marco-MiniLM-L-6-v2')
-MCP_QUALITY_LOCAL_DEVICE = os.getenv('MCP_QUALITY_LOCAL_DEVICE', 'auto').lower()  # auto|cpu|cuda|mps|directml
-
-# Quality-Boosted Search Configuration
-MCP_QUALITY_BOOST_ENABLED = safe_get_bool_env('MCP_QUALITY_BOOST_ENABLED', False)  # Opt-in by default
-MCP_QUALITY_BOOST_WEIGHT = float(os.getenv('MCP_QUALITY_BOOST_WEIGHT', '0.3'))  # 30% quality, 70% semantic
-
-# Validate quality boost weight
-if not 0.0 <= MCP_QUALITY_BOOST_WEIGHT <= 1.0:
-    logger.warning(f"Invalid quality boost weight: {MCP_QUALITY_BOOST_WEIGHT}, must be 0.0-1.0. Using default 0.3")
-    MCP_QUALITY_BOOST_WEIGHT = 0.3
-
-# Quality-Based Retention Policy (Consolidation)
-MCP_QUALITY_RETENTION_HIGH = safe_get_int_env('MCP_QUALITY_RETENTION_HIGH', 365, min_value=1, max_value=3650)       # days for quality ≥0.7
-MCP_QUALITY_RETENTION_MEDIUM = safe_get_int_env('MCP_QUALITY_RETENTION_MEDIUM', 180, min_value=1, max_value=3650)  # days for quality 0.5-0.7
-MCP_QUALITY_RETENTION_LOW_MIN = safe_get_int_env('MCP_QUALITY_RETENTION_LOW_MIN', 30, min_value=1, max_value=365)  # minimum days for quality <0.5
-MCP_QUALITY_RETENTION_LOW_MAX = safe_get_int_env('MCP_QUALITY_RETENTION_LOW_MAX', 90, min_value=1, max_value=365)  # maximum days for quality <0.5
-
-# Log quality system configuration
-logger.info(f"Quality System: enabled={MCP_QUALITY_SYSTEM_ENABLED}, provider={MCP_QUALITY_AI_PROVIDER}")
-if MCP_QUALITY_SYSTEM_ENABLED:
-    logger.info(f"Quality Boost Search: enabled={MCP_QUALITY_BOOST_ENABLED}, weight={MCP_QUALITY_BOOST_WEIGHT}")
-    logger.info(f"Quality Retention: high={MCP_QUALITY_RETENTION_HIGH}d, medium={MCP_QUALITY_RETENTION_MEDIUM}d, low={MCP_QUALITY_RETENTION_LOW_MIN}-{MCP_QUALITY_RETENTION_LOW_MAX}d")
-
-# =============================================================================
-# End Quality System Configuration
-# =============================================================================
-
-# =============================================================================
-# Association-Based Quality Enhancement Configuration (v8.47.0+)
-# =============================================================================
-
-# Enable association-based quality boost during consolidation
-MCP_CONSOLIDATION_QUALITY_BOOST_ENABLED = safe_get_bool_env('MCP_CONSOLIDATION_QUALITY_BOOST_ENABLED', True)
-
-# Minimum connection count required to trigger quality boost
-MCP_CONSOLIDATION_MIN_CONNECTIONS_FOR_BOOST = safe_get_int_env('MCP_CONSOLIDATION_MIN_CONNECTIONS_FOR_BOOST', 5, min_value=1, max_value=100)
-
-# Quality boost multiplier (e.g., 1.2 = 20% boost)
-MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR = float(os.getenv('MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR', '1.2'))
-
-# Validate quality boost factor
-if not 1.0 <= MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR <= 2.0:
-    logger.warning(f"Invalid consolidation quality boost factor: {MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR}, must be 1.0-2.0. Using default 1.2")
-    MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR = 1.2
-
-# Minimum average quality of connected memories to trigger boost
-MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY = float(os.getenv('MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY', '0.7'))
-
-# Validate minimum connected quality
-if not 0.0 <= MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY <= 1.0:
-    logger.warning(f"Invalid consolidation minimum connected quality: {MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY}, must be 0.0-1.0. Using default 0.7")
-    MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY = 0.7
-
-# Log association-based quality boost configuration
-if MCP_CONSOLIDATION_QUALITY_BOOST_ENABLED:
-    logger.info(f"Association Quality Boost: enabled, min_connections={MCP_CONSOLIDATION_MIN_CONNECTIONS_FOR_BOOST}, "
-               f"boost_factor={MCP_CONSOLIDATION_QUALITY_BOOST_FACTOR}, min_connected_quality={MCP_CONSOLIDATION_MIN_CONNECTED_QUALITY}")
-
-# =============================================================================
-# End Association-Based Quality Enhancement Configuration
-# =============================================================================
-
-# =============================================================================
-# Graph Database Configuration (v8.51.0+)
-# =============================================================================
-
-# Graph storage mode controls how memory associations are stored
-# Options:
-#   - 'memories_only': Store associations in memories.metadata.associations (backward compatible, v8.48.0 behavior)
-#   - 'dual_write': Write to both memories.metadata.associations AND memory_graph table (migration mode, default)
-#   - 'graph_only': Write to memory_graph table only (future mode, requires migration complete)
-GRAPH_STORAGE_MODE = os.getenv('MCP_GRAPH_STORAGE_MODE', 'dual_write').lower()
-
-# Validate graph storage mode
-VALID_GRAPH_MODES = ['memories_only', 'dual_write', 'graph_only']
-if GRAPH_STORAGE_MODE not in VALID_GRAPH_MODES:
-    logger.warning(f"Invalid graph storage mode: {GRAPH_STORAGE_MODE}, must be one of {VALID_GRAPH_MODES}. Using default 'dual_write'")
-    GRAPH_STORAGE_MODE = 'dual_write'
-
-logger.info(f"Graph Storage Mode: {GRAPH_STORAGE_MODE}")
-
-# =============================================================================
-# End Graph Database Configuration
-# =============================================================================
+    _settings = settings._get_instance()
+    if _settings.storage.use_onnx:
+        cache_path = os.path.join(_settings.paths.base_dir, "onnx_models")
+        os.makedirs(cache_path, exist_ok=True)
+        return cache_path
+    return None

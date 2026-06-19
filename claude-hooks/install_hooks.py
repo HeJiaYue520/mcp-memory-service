@@ -16,62 +16,42 @@ Implements DRY principle by detecting and reusing existing Claude Code MCP confi
 Version: Dynamically synced with main project version
 """
 
-import os
-import sys
-import json
-import shutil
-import platform
 import argparse
+import json
+import os
+import platform
+import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
-# Fix Windows console encoding for Unicode output (emojis, checkmarks)
-if sys.platform == 'win32':
-    try:
-        # Set console to UTF-8 mode
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetConsoleOutputCP(65001)
-        kernel32.SetConsoleCP(65001)
-        # Reconfigure stdout/stderr to use UTF-8
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except Exception:
-        pass  # Fallback: some terminals may not support this
 
 # Dynamic version detection from main project
 def get_project_version() -> str:
-    """Get version dynamically from main project (reads pyproject.toml to avoid import warnings)."""
+    """Get version dynamically from main project."""
     try:
-        # Read version from pyproject.toml to avoid importing storage modules
-        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
-        if pyproject_path.exists():
-            with open(pyproject_path, 'r') as f:
-                for line in f:
-                    if line.startswith('version = '):
-                        # Extract version from: version = "X.Y.Z"
-                        return line.split('"')[1]
-
-        # Fallback: try importing (may show warnings)
+        # Add the src directory to the path to import version
         src_path = Path(__file__).parent.parent / "src"
         if str(src_path) not in sys.path:
             sys.path.insert(0, str(src_path))
-        from mcp_memory_service._version import __version__
+
+        from mcp_memory_service import __version__
+
         return __version__
-    except Exception:
+    except ImportError:
         # Fallback for standalone installations
         return "7.2.0"
 
 
 class Colors:
     """ANSI color codes for terminal output."""
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    RED = '\033[0;31m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    NC = '\033[0m'  # No Color
+
+    GREEN = "\033[0;32m"
+    YELLOW = "\033[1;33m"
+    RED = "\033[0;31m"
+    BLUE = "\033[0;34m"
+    CYAN = "\033[0;36m"
+    NC = "\033[0m"  # No Color
 
 
 class HookInstaller:
@@ -93,22 +73,16 @@ class HookInstaller:
 
         # Primary paths by platform
         primary_paths = {
-            'windows': [
-                home / 'AppData' / 'Roaming' / 'Claude' / 'hooks',
-                home / '.claude' / 'hooks'
+            "windows": [home / "AppData" / "Roaming" / "Claude" / "hooks", home / ".claude" / "hooks"],
+            "darwin": [  # macOS
+                home / ".claude" / "hooks",
+                home / "Library" / "Application Support" / "Claude" / "hooks",
             ],
-            'darwin': [  # macOS
-                home / '.claude' / 'hooks',
-                home / 'Library' / 'Application Support' / 'Claude' / 'hooks'
-            ],
-            'linux': [
-                home / '.claude' / 'hooks',
-                home / '.config' / 'claude' / 'hooks'
-            ]
+            "linux": [home / ".claude" / "hooks", home / ".config" / "claude" / "hooks"],
         }
 
         # Check platform-specific paths first
-        platform_paths = primary_paths.get(self.platform_name, primary_paths['linux'])
+        platform_paths = primary_paths.get(self.platform_name, primary_paths["linux"])
 
         for path in platform_paths:
             if path.exists():
@@ -116,15 +90,14 @@ class HookInstaller:
 
         # Check if Claude Code CLI can tell us the location
         try:
-            result = subprocess.run(['claude', '--help'],
-                                  capture_output=True, text=True, timeout=5)
+            subprocess.run(["claude", "--help"], capture_output=True, text=True, timeout=5)
             # Look for hooks directory info in help output
             # This is a placeholder - actual Claude CLI might not provide this
         except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
         # Default to standard location
-        return home / '.claude' / 'hooks'
+        return home / ".claude" / "hooks"
 
     def info(self, message: str) -> None:
         """Print info message."""
@@ -156,8 +129,7 @@ class HookInstaller:
 
         # Check Claude Code CLI
         try:
-            result = subprocess.run(['claude', '--version'],
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 self.success(f"Claude Code CLI found: {result.stdout.strip()}")
             else:
@@ -168,11 +140,10 @@ class HookInstaller:
 
         # Check Node.js
         try:
-            result = subprocess.run(['node', '--version'],
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 version = result.stdout.strip()
-                major_version = int(version.replace('v', '').split('.')[0])
+                major_version = int(version.replace("v", "").split(".")[0])
                 if major_version >= 14:
                     self.success(f"Node.js found: {version} (compatible)")
                 else:
@@ -187,22 +158,17 @@ class HookInstaller:
             all_good = False
 
         # Check Python version
-        if sys.version_info < (3, 7):
-            self.error(f"Python {sys.version} found, but Python 3.7+ required")
-            all_good = False
-        else:
-            self.success(f"Python {sys.version_info.major}.{sys.version_info.minor} found (compatible)")
+        self.success(f"Python {sys.version_info.major}.{sys.version_info.minor} found (compatible)")
 
         return all_good
 
-    def detect_claude_mcp_configuration(self) -> Optional[Dict]:
+    def detect_claude_mcp_configuration(self) -> dict | None:
         """Detect existing Claude Code MCP memory server configuration."""
         self.info("Detecting existing Claude Code MCP configuration...")
 
         try:
             # Check if memory server is configured in Claude Code
-            result = subprocess.run(['claude', 'mcp', 'get', 'memory'],
-                                  capture_output=True, text=True, timeout=10)
+            result = subprocess.run(["claude", "mcp", "get", "memory"], capture_output=True, text=True, timeout=10)
 
             if result.returncode == 0:
                 # Parse the output to extract configuration details
@@ -226,27 +192,27 @@ class HookInstaller:
 
         return None
 
-    def _parse_mcp_get_output(self, output: str) -> Optional[Dict]:
+    def _parse_mcp_get_output(self, output: str) -> dict | None:
         """Parse the output of 'claude mcp get memory' command."""
         config = {}
 
         try:
-            lines = output.strip().split('\n')
+            lines = output.strip().split("\n")
             for line in lines:
                 line = line.strip()
-                if line.startswith('Status:'):
-                    config['status'] = line.replace('Status:', '').strip()
-                elif line.startswith('Type:'):
-                    config['type'] = line.replace('Type:', '').strip()
-                elif line.startswith('Command:'):
-                    config['command'] = line.replace('Command:', '').strip()
-                elif line.startswith('Scope:'):
-                    config['scope'] = line.replace('Scope:', '').strip()
-                elif line.startswith('Environment:'):
-                    config['environment'] = line.replace('Environment:', '').strip()
+                if line.startswith("Status:"):
+                    config["status"] = line.replace("Status:", "").strip()
+                elif line.startswith("Type:"):
+                    config["type"] = line.replace("Type:", "").strip()
+                elif line.startswith("Command:"):
+                    config["command"] = line.replace("Command:", "").strip()
+                elif line.startswith("Scope:"):
+                    config["scope"] = line.replace("Scope:", "").strip()
+                elif line.startswith("Environment:"):
+                    config["environment"] = line.replace("Environment:", "").strip()
 
             # Only return config if we found essential information
-            if 'command' in config and 'status' in config:
+            if "command" in config and "status" in config:
                 return config
 
         except Exception as e:
@@ -261,44 +227,14 @@ class HookInstaller:
         # Check for Claude Code MCP server (indicates Claude Code is active)
         mcp_config = self.detect_claude_mcp_configuration()
 
-        if mcp_config and 'Connected' in mcp_config.get('status', ''):
+        if mcp_config and "Connected" in mcp_config.get("status", ""):
             self.success("Claude Code environment detected (MCP server active)")
             return self.CLAUDE_CODE_ENV
         else:
             self.success("Standalone environment detected (no active MCP server)")
             return self.STANDALONE_ENV
 
-    def _detect_python_path(self) -> str:
-        """Detect the appropriate Python executable path for the current platform.
-
-        Returns:
-            str: Python executable path (sys.executable for venv support, fallback to 'python3'/'python')
-        """
-        import sys
-        import platform
-        import os
-
-        # Check Python version (must be 3.10+)
-        if sys.version_info < (3, 10):
-            self.warn(f"Python {sys.version_info.major}.{sys.version_info.minor} detected - code execution requires 3.10+")
-
-        # Use sys.executable to get the current Python interpreter
-        # This ensures venv Python is used if installer runs from venv
-        current_python = sys.executable
-
-        # Verify the executable exists and is accessible
-        if current_python and os.path.isfile(current_python) and os.access(current_python, os.X_OK):
-            self.info(f"Using Python interpreter: {current_python}")
-            return current_python
-
-        # Fallback to platform-specific defaults if sys.executable is unavailable
-        self.warn("Could not detect Python executable, using platform default")
-        if platform.system() == 'Windows':
-            return 'python'
-        else:
-            return 'python3'
-
-    def configure_protocol_for_environment(self, env_type: str) -> Dict:
+    def configure_protocol_for_environment(self, env_type: str) -> dict:
         """Configure optimal protocol based on detected environment."""
         # Data-driven configuration map
         config_map = {
@@ -308,7 +244,7 @@ class HookInstaller:
                 "fallbackEnabled": True,
                 "reason": "Claude Code environment - using HTTP to avoid MCP conflicts",
                 "log_title": "📋 Protocol Configuration: HTTP (recommended for Claude Code)",
-                "log_reason": "Avoids MCP server conflicts when Claude Code is active"
+                "log_reason": "Avoids MCP server conflicts when Claude Code is active",
             },
             self.STANDALONE_ENV: {
                 "protocol": "auto",
@@ -316,8 +252,8 @@ class HookInstaller:
                 "fallbackEnabled": True,
                 "reason": "Standalone environment - MCP preferred for performance",
                 "log_title": "📋 Protocol Configuration: Auto (MCP preferred)",
-                "log_reason": "MCP provides best performance in standalone scenarios"
-            }
+                "log_reason": "MCP provides best performance in standalone scenarios",
+            },
         }
 
         # Get configuration for environment type (default to standalone if unknown)
@@ -332,10 +268,10 @@ class HookInstaller:
             "protocol": config["protocol"],
             "preferredProtocol": config["preferredProtocol"],
             "fallbackEnabled": config["fallbackEnabled"],
-            "reason": config["reason"]
+            "reason": config["reason"],
         }
 
-    def validate_mcp_prerequisites(self, detected_config: Optional[Dict] = None) -> Tuple[bool, List[str]]:
+    def validate_mcp_prerequisites(self, detected_config: dict | None = None) -> tuple[bool, list[str]]:
         """Validate that MCP memory service is properly configured."""
         issues = []
 
@@ -347,25 +283,25 @@ class HookInstaller:
             return False, issues
 
         # Check if server is connected
-        status = detected_config.get('status', '')
-        if '✓ Connected' not in status and 'Connected' not in status:
+        status = detected_config.get("status", "")
+        if "✓ Connected" not in status and "Connected" not in status:
             issues.append(f"Memory server is not connected. Status: {status}")
 
         # Validate command format
-        command = detected_config.get('command', '')
+        command = detected_config.get("command", "")
         if not command:
             issues.append("Memory server command is empty")
-        elif 'mcp_memory_service' not in command:
+        elif "mcp_memory_service" not in command:
             issues.append(f"Unexpected memory server command: {command}")
 
         # Check server type
-        server_type = detected_config.get('type', '')
-        if server_type not in ['stdio', 'http']:
+        server_type = detected_config.get("type", "")
+        if server_type not in ["stdio", "http"]:
             issues.append(f"Unsupported server type: {server_type}")
 
         return len(issues) == 0, issues
 
-    def generate_hooks_config_from_mcp(self, detected_config: Dict, env_type: str = "standalone") -> Dict:
+    def generate_hooks_config_from_mcp(self, detected_config: dict, env_type: str = "standalone") -> dict:
         """Generate hooks configuration based on detected Claude Code MCP setup.
 
         Args:
@@ -375,40 +311,20 @@ class HookInstaller:
         Returns:
             Dictionary containing complete hooks configuration
         """
-        command = detected_config.get('command', '')
-        server_type = detected_config.get('type', 'stdio')
+        detected_config.get("command", "")
+        server_type = detected_config.get("type", "stdio")
 
         # Get environment-appropriate protocol configuration
         protocol_config = self.configure_protocol_for_environment(env_type)
 
-        if server_type == 'stdio':
+        if server_type == "stdio":
             # For stdio servers, we'll reference the existing server
-            mcp_config = {
-                "useExistingServer": True,
-                "serverName": "memory",
-                "connectionTimeout": 5000,
-                "toolCallTimeout": 10000
-            }
+            mcp_config = {"useExistingServer": True, "serverName": "memory", "connectionTimeout": 5000, "toolCallTimeout": 10000}
         else:
             # For HTTP servers, extract endpoint information
-            mcp_config = {
-                "useExistingServer": True,
-                "serverName": "memory",
-                "connectionTimeout": 5000,
-                "toolCallTimeout": 10000
-            }
-
-        # Detect Python path based on platform
-        python_path = self._detect_python_path()
+            mcp_config = {"useExistingServer": True, "serverName": "memory", "connectionTimeout": 5000, "toolCallTimeout": 10000}
 
         config = {
-            "codeExecution": {
-                "enabled": True,
-                "timeout": 8000,
-                "fallbackToMCP": True,
-                "enableMetrics": True,
-                "pythonPath": python_path
-            },
             "memoryService": {
                 "protocol": protocol_config["protocol"],
                 "preferredProtocol": protocol_config["preferredProtocol"],
@@ -417,7 +333,7 @@ class HookInstaller:
                     "endpoint": "https://localhost:8443",
                     "apiKey": "auto-detect",
                     "healthCheckTimeout": 3000,
-                    "useDetailedHealthCheck": True
+                    "useDetailedHealthCheck": True,
                 },
                 "mcp": mcp_config,
                 "defaultTags": ["claude-code", "auto-generated"],
@@ -429,13 +345,13 @@ class HookInstaller:
                 "recentTimeWindow": "last-week",
                 "fallbackTimeWindow": "last-month",
                 "showStorageSource": True,
-                "sourceDisplayMode": "brief"
+                "sourceDisplayMode": "brief",
             }
         }
 
         return config
 
-    def generate_basic_config(self, env_type: str = "standalone") -> Dict:
+    def generate_basic_config(self, env_type: str = "standalone") -> dict:
         """Generate basic configuration when no template is available.
 
         Args:
@@ -447,17 +363,7 @@ class HookInstaller:
         # Get environment-appropriate protocol configuration
         protocol_config = self.configure_protocol_for_environment(env_type)
 
-        # Detect Python path based on platform
-        python_path = self._detect_python_path()
-
         return {
-            "codeExecution": {
-                "enabled": True,
-                "timeout": 8000,
-                "fallbackToMCP": True,
-                "enableMetrics": True,
-                "pythonPath": python_path
-            },
             "memoryService": {
                 "protocol": protocol_config["protocol"],
                 "preferredProtocol": protocol_config["preferredProtocol"],
@@ -466,13 +372,13 @@ class HookInstaller:
                     "endpoint": "https://localhost:8443",
                     "apiKey": "auto-detect",
                     "healthCheckTimeout": 3000,
-                    "useDetailedHealthCheck": True
+                    "useDetailedHealthCheck": True,
                 },
                 "mcp": {
                     "serverCommand": ["uv", "run", "python", "-m", "mcp_memory_service.server"],
                     "serverWorkingDir": str(self.script_dir.parent),
                     "connectionTimeout": 5000,
-                    "toolCallTimeout": 10000
+                    "toolCallTimeout": 10000,
                 },
                 "defaultTags": ["claude-code", "auto-generated"],
                 "maxMemoriesPerSession": 8,
@@ -483,31 +389,26 @@ class HookInstaller:
                 "recentTimeWindow": "last-week",
                 "fallbackTimeWindow": "last-month",
                 "showStorageSource": True,
-                "sourceDisplayMode": "brief"
+                "sourceDisplayMode": "brief",
             },
             "projectDetection": {
                 "gitRepository": True,
                 "packageFiles": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml"],
                 "frameworkDetection": True,
                 "languageDetection": True,
-                "confidenceThreshold": 0.3
+                "confidenceThreshold": 0.3,
             },
-            "output": {
-                "verbose": True,
-                "showMemoryDetails": True,
-                "showProjectDetails": True,
-                "cleanMode": False
-            }
+            "output": {"verbose": True, "showMemoryDetails": True, "showProjectDetails": True, "cleanMode": False},
         }
 
-    def enhance_config_for_natural_triggers(self, config: Dict) -> Dict:
+    def enhance_config_for_natural_triggers(self, config: dict) -> dict:
         """Enhance configuration with Natural Memory Triggers settings."""
         # Add natural triggers configuration
         config["naturalTriggers"] = {
             "enabled": True,
             "triggerThreshold": 0.6,
             "cooldownPeriod": 30000,
-            "maxMemoriesPerTrigger": 5
+            "maxMemoriesPerTrigger": 5,
         }
 
         # Add performance configuration
@@ -521,23 +422,23 @@ class HookInstaller:
                     "enabledTiers": ["instant"],
                     "backgroundProcessing": False,
                     "degradeThreshold": 200,
-                    "description": "Fastest response, minimal memory awareness"
+                    "description": "Fastest response, minimal memory awareness",
                 },
                 "balanced": {
                     "maxLatency": 200,
                     "enabledTiers": ["instant", "fast"],
                     "backgroundProcessing": True,
                     "degradeThreshold": 400,
-                    "description": "Moderate latency, smart memory triggers"
+                    "description": "Moderate latency, smart memory triggers",
                 },
                 "memory_aware": {
                     "maxLatency": 500,
                     "enabledTiers": ["instant", "fast", "intensive"],
                     "backgroundProcessing": True,
                     "degradeThreshold": 1000,
-                    "description": "Full memory awareness, accept higher latency"
-                }
-            }
+                    "description": "Full memory awareness, accept higher latency",
+                },
+            },
         }
 
         # Add other advanced settings
@@ -547,7 +448,7 @@ class HookInstaller:
             "maxCommits": 20,
             "includeChangelog": True,
             "maxGitMemories": 3,
-            "gitContextWeight": 1.2
+            "gitContextWeight": 1.2,
         }
 
         return config
@@ -558,11 +459,11 @@ class HookInstaller:
             self.info("No existing hooks installation found - no backup needed")
             return
 
-        timestamp = subprocess.run(['date', '+%Y%m%d-%H%M%S'],
-                                 capture_output=True, text=True).stdout.strip()
+        timestamp = subprocess.run(["date", "+%Y%m%d-%H%M%S"], capture_output=True, text=True).stdout.strip()
         if not timestamp:  # Fallback for Windows
             import datetime
-            timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
         self.backup_dir = self.claude_hooks_dir.parent / f"hooks-backup-{timestamp}"
 
@@ -584,12 +485,7 @@ class HookInstaller:
             (self.claude_hooks_dir / "tests").mkdir(parents=True, exist_ok=True)
 
             # Core hooks
-            core_files = [
-                "session-start.js",
-                "session-end.js",
-                "memory-retrieval.js",
-                "topic-change.js"
-            ]
+            core_files = ["session-start.js", "session-end.js", "memory-retrieval.js", "topic-change.js"]
 
             for file in core_files:
                 src = self.script_dir / "core" / file
@@ -599,18 +495,25 @@ class HookInstaller:
                 else:
                     self.warn(f"Core file not found: {file}")
 
-            # Copy ALL utility files to ensure updates are deployed
-            # This prevents stale versions when files are updated in the repo
-            utilities_dir = self.script_dir / "utilities"
-            if utilities_dir.exists():
-                utility_count = 0
-                for utility_file in utilities_dir.glob("*.js"):
-                    dst = self.claude_hooks_dir / "utilities" / utility_file.name
-                    shutil.copy2(utility_file, dst)
-                    utility_count += 1
-                self.success(f"Copied {utility_count} utility files")
-            else:
-                self.warn("Utilities directory not found")
+            # Basic utilities
+            utility_files = [
+                "project-detector.js",
+                "memory-scorer.js",
+                "context-formatter.js",
+                "context-shift-detector.js",
+                "conversation-analyzer.js",
+                "dynamic-context-updater.js",
+                "session-tracker.js",
+                "git-analyzer.js",
+            ]
+
+            for file in utility_files:
+                src = self.script_dir / "utilities" / file
+                dst = self.claude_hooks_dir / "utilities" / file
+                if src.exists():
+                    shutil.copy2(src, dst)
+                else:
+                    self.warn(f"Utility file not found: {file}")
 
             # Tests
             test_files = ["integration-test.js"]
@@ -631,22 +534,22 @@ class HookInstaller:
                 statusline_dst = self.claude_hooks_dir / "statusline.sh"
                 shutil.copy2(statusline_src, statusline_dst)
                 # Make executable on Unix-like systems
-                if self.platform_name != 'windows':
+                if self.platform_name != "windows":
                     os.chmod(statusline_dst, 0o755)
                 self.success("StatusLine script installed")
 
                 # Check for jq dependency
-                jq_available = shutil.which('jq') is not None
+                jq_available = shutil.which("jq") is not None
                 if jq_available:
                     self.success("✓ jq is installed (required for statusLine)")
                 else:
                     self.warn("⚠ jq not found - statusLine requires jq for JSON parsing")
                     self.info("  Install jq:")
-                    if self.platform_name == 'darwin':
+                    if self.platform_name == "darwin":
                         self.info("    macOS: brew install jq")
-                    elif self.platform_name == 'linux':
+                    elif self.platform_name == "linux":
                         self.info("    Linux: sudo apt install jq  (or equivalent)")
-                    elif self.platform_name == 'windows':
+                    elif self.platform_name == "windows":
                         self.info("    Windows: choco install jq  (or download from https://jqlang.github.io/jq/)")
 
             self.success("Basic hooks installed successfully")
@@ -654,48 +557,6 @@ class HookInstaller:
 
         except Exception as e:
             self.error(f"Failed to install basic hooks: {e}")
-            return False
-
-    def install_auto_capture(self) -> bool:
-        """Install Smart Auto-Capture hooks for automatic memory capture."""
-        self.info("Installing Smart Auto-Capture hooks...")
-
-        try:
-            # Ensure directories exist
-            (self.claude_hooks_dir / "core").mkdir(parents=True, exist_ok=True)
-            (self.claude_hooks_dir / "utilities").mkdir(parents=True, exist_ok=True)
-
-            # Auto-capture pattern definitions (shared utility)
-            patterns_src = self.script_dir / "utilities" / "auto-capture-patterns.js"
-            if patterns_src.exists():
-                shutil.copy2(patterns_src, self.claude_hooks_dir / "utilities" / "auto-capture-patterns.js")
-                self.success("Installed auto-capture-patterns.js")
-            else:
-                self.warn("auto-capture-patterns.js not found")
-                return False
-
-            # Auto-capture hook (Node.js version - primary)
-            hook_js_src = self.script_dir / "core" / "auto-capture-hook.js"
-            if hook_js_src.exists():
-                shutil.copy2(hook_js_src, self.claude_hooks_dir / "core" / "auto-capture-hook.js")
-                self.success("Installed auto-capture-hook.js (Node.js)")
-            else:
-                self.warn("auto-capture-hook.js not found")
-                return False
-
-            # Auto-capture hook (PowerShell version - Windows alternative)
-            hook_ps1_src = self.script_dir / "core" / "auto-capture-hook.ps1"
-            if hook_ps1_src.exists():
-                shutil.copy2(hook_ps1_src, self.claude_hooks_dir / "core" / "auto-capture-hook.ps1")
-                self.success("Installed auto-capture-hook.ps1 (PowerShell)")
-            else:
-                self.warn("auto-capture-hook.ps1 not found (optional for Windows)")
-
-            self.success("Smart Auto-Capture hooks installed successfully")
-            return True
-
-        except Exception as e:
-            self.error(f"Failed to install Smart Auto-Capture hooks: {e}")
             return False
 
     def install_natural_triggers(self) -> bool:
@@ -715,24 +576,25 @@ class HookInstaller:
             else:
                 self.warn("Mid-conversation hook not found")
 
-            # CRITICAL: Copy ALL utility files to ensure updates are deployed
-            # This prevents the issue where updated files like memory-scorer.js don't get copied
-            utilities_dir = self.script_dir / "utilities"
-            if utilities_dir.exists():
-                utility_count = 0
-                for utility_file in utilities_dir.glob("*.js"):
-                    dst = self.claude_hooks_dir / "utilities" / utility_file.name
-                    shutil.copy2(utility_file, dst)
-                    utility_count += 1
-                self.success(f"Copied {utility_count} utility files (ensuring all updates are deployed)")
-            else:
-                self.warn("Utilities directory not found")
+            # v7.1.3 enhanced utilities
+            enhanced_utilities = [
+                "adaptive-pattern-detector.js",
+                "tiered-conversation-monitor.js",
+                "performance-manager.js",
+                "mcp-client.js",
+                "memory-client.js",
+            ]
+
+            for file in enhanced_utilities:
+                src = self.script_dir / "utilities" / file
+                dst = self.claude_hooks_dir / "utilities" / file
+                if src.exists():
+                    shutil.copy2(src, dst)
+                else:
+                    self.warn(f"Enhanced utility not found: {file}")
 
             # CLI management tools
-            cli_tools = [
-                "memory-mode-controller.js",
-                "debug-pattern-test.js"
-            ]
+            cli_tools = ["memory-mode-controller.js", "debug-pattern-test.js"]
 
             for file in cli_tools:
                 src = self.script_dir / file
@@ -741,11 +603,7 @@ class HookInstaller:
                     shutil.copy2(src, dst)
 
             # Test files
-            test_files = [
-                "test-natural-triggers.js",
-                "test-mcp-hook.js",
-                "test-dual-protocol-hook.js"
-            ]
+            test_files = ["test-natural-triggers.js", "test-mcp-hook.js", "test-dual-protocol-hook.js"]
 
             for file in test_files:
                 src = self.script_dir / file
@@ -760,7 +618,9 @@ class HookInstaller:
             self.error(f"Failed to install Natural Memory Triggers: {e}")
             return False
 
-    def install_configuration(self, install_natural_triggers: bool = False, detected_mcp: Optional[Dict] = None, env_type: str = "standalone") -> bool:
+    def install_configuration(
+        self, install_natural_triggers: bool = False, detected_mcp: dict | None = None, env_type: str = "standalone"
+    ) -> bool:
         """Install or update configuration files.
 
         Args:
@@ -786,7 +646,7 @@ class HookInstaller:
 
             if config_dst.exists():
                 # Backup existing config
-                backup_config = config_dst.with_suffix('.json.backup')
+                backup_config = config_dst.with_suffix(".json.backup")
                 shutil.copy2(config_dst, backup_config)
                 self.info("Existing configuration backed up")
 
@@ -798,12 +658,12 @@ class HookInstaller:
                     self.success("Generated configuration based on detected MCP setup")
                 elif config_src.exists():
                     # Use template configuration and update paths
-                    with open(config_src, 'r', encoding='utf-8') as f:
+                    with open(config_src) as f:
                         config = json.load(f)
 
                     # Update server working directory path for independent setup
-                    if 'memoryService' in config and 'mcp' in config['memoryService']:
-                        config['memoryService']['mcp']['serverWorkingDir'] = str(self.script_dir.parent)
+                    if "memoryService" in config and "mcp" in config["memoryService"]:
+                        config["memoryService"]["mcp"]["serverWorkingDir"] = str(self.script_dir.parent)
 
                     self.success("Generated configuration using template with updated paths")
                 else:
@@ -816,8 +676,8 @@ class HookInstaller:
                     config = self.enhance_config_for_natural_triggers(config)
 
                 # Write the final configuration
-                with open(config_dst, 'w', encoding='utf-8') as f:
-                    json.dump(config, f, indent=2, ensure_ascii=False)
+                with open(config_dst, "w") as f:
+                    json.dump(config, f, indent=2)
 
                 self.success("Configuration installed successfully")
 
@@ -834,62 +694,48 @@ class HookInstaller:
             self.error(f"Failed to install configuration: {e}")
             return False
 
-    def configure_claude_settings(self, install_mid_conversation: bool = False, install_auto_capture: bool = False) -> bool:
+    def configure_claude_settings(self, install_mid_conversation: bool = False) -> bool:
         """Configure Claude Code settings.json for hook integration."""
         self.info("Configuring Claude Code settings...")
 
         try:
             # Determine settings path based on platform
             home = Path.home()
-            if self.platform_name == 'windows':
-                settings_dir = home / 'AppData' / 'Roaming' / 'Claude'
+            if self.platform_name == "windows":
+                settings_dir = home / "AppData" / "Roaming" / "Claude"
             else:
-                settings_dir = home / '.claude'
+                settings_dir = home / ".claude"
 
             settings_dir.mkdir(parents=True, exist_ok=True)
-            settings_file = settings_dir / 'settings.json'
-
-            # Windows-specific warning for SessionStart hooks (issue #160)
-            skip_session_start = False
-            if self.platform_name == 'windows':
-                self.warn("Windows Platform Detected - SessionStart Hook Limitation")
-                self.warn("SessionStart hooks cause Claude Code to hang on Windows (issue #160)")
-                self.warn("Workaround: Use '/session-start' slash command instead")
-                self.info("Skipping SessionStart hook configuration for Windows")
-                self.info("See: https://github.com/doobidoo/mcp-memory-service/issues/160")
-                skip_session_start = True
+            settings_file = settings_dir / "settings.json"
 
             # Create hook configuration
             hook_config = {
-                "hooks": {}
-            }
-
-            # Add SessionStart only on non-Windows platforms
-            if not skip_session_start:
-                hook_config["hooks"]["SessionStart"] = [
-                    {
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": f'node "{self.claude_hooks_dir}/core/session-start.js"',
-                                "timeout": 10
-                            }
-                        ]
-                    }
-                ]
-
-            # SessionEnd works on all platforms
-            hook_config["hooks"]["SessionEnd"] = [
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f'node "{self.claude_hooks_dir}/core/session-start.js"',
+                                    "timeout": 10,
+                                }
+                            ]
+                        }
+                    ],
+                    "SessionEnd": [
                         {
                             "hooks": [
                                 {
                                     "type": "command",
                                     "command": f'node "{self.claude_hooks_dir}/core/session-end.js"',
-                                    "timeout": 15
+                                    "timeout": 15,
                                 }
                             ]
                         }
-                    ]
+                    ],
+                }
+            }
 
             # Add mid-conversation hook if Natural Memory Triggers are installed
             if install_mid_conversation:
@@ -899,82 +745,58 @@ class HookInstaller:
                             {
                                 "type": "command",
                                 "command": f'node "{self.claude_hooks_dir}/core/mid-conversation.js"',
-                                "timeout": 8
+                                "timeout": 8,
                             }
                         ]
                     }
                 ]
 
-            # Add PostToolUse hook for auto-capture if enabled
-            if install_auto_capture:
-                # Use PowerShell on Windows, Node.js elsewhere
-                if self.platform_name == 'windows':
-                    auto_capture_command = f'powershell -ExecutionPolicy Bypass -File "{self.claude_hooks_dir}/core/auto-capture-hook.ps1"'
-                else:
-                    auto_capture_command = f'node "{self.claude_hooks_dir}/core/auto-capture-hook.js"'
-
-                hook_config["hooks"]["PostToolUse"] = [
-                    {
-                        "matchers": ["Edit", "Write", "Bash"],
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": auto_capture_command,
-                                "timeout": 5
-                            }
-                        ]
-                    }
-                ]
-                self.success("Added PostToolUse hook for Smart Auto-Capture (Edit, Write, Bash)")
-
-            # Add statusLine configuration for v8.5.7+ (Unix/Linux/macOS only - requires bash)
-            statusline_script = self.claude_hooks_dir / 'statusline.sh'
-            if statusline_script.exists() and self.platform_name != 'windows':
-                hook_config["statusLine"] = {
-                    "type": "command",
-                    "command": str(statusline_script),
-                    "padding": 0
-                }
+            # Add statusLine configuration for v8.5.7+ (if statusline.sh exists)
+            statusline_script = self.claude_hooks_dir / "statusline.sh"
+            if statusline_script.exists():
+                hook_config["statusLine"] = {"type": "command", "command": str(statusline_script), "padding": 0}
                 self.info("Added statusLine configuration for memory awareness display")
-            elif statusline_script.exists() and self.platform_name == 'windows':
-                self.info("Skipping statusLine (requires bash - not available on Windows)")
 
             # Handle existing settings with intelligent merging
             final_config = hook_config
             if settings_file.exists():
                 # Backup existing settings
-                backup_settings = settings_file.with_suffix('.json.backup')
+                backup_settings = settings_file.with_suffix(".json.backup")
                 shutil.copy2(settings_file, backup_settings)
                 self.info("Existing settings.json backed up")
 
                 try:
                     # Load existing settings
-                    with open(settings_file, 'r', encoding='utf-8') as f:
+                    with open(settings_file) as f:
                         existing_settings = json.load(f)
 
                     # Intelligent merging: preserve existing hooks while adding/updating memory awareness hooks
-                    if 'hooks' not in existing_settings:
-                        existing_settings['hooks'] = {}
+                    if "hooks" not in existing_settings:
+                        existing_settings["hooks"] = {}
 
                     # Check for conflicts and merge intelligently
-                    memory_hook_types = {'SessionStart', 'SessionEnd', 'UserPromptSubmit'}
+                    memory_hook_types = {"SessionStart", "SessionEnd", "UserPromptSubmit"}
                     conflicts = []
 
                     for hook_type in memory_hook_types:
-                        if hook_type in existing_settings['hooks'] and hook_type in hook_config['hooks']:
+                        if hook_type in existing_settings["hooks"] and hook_type in hook_config["hooks"]:
                             # Check if existing hook is different from our memory awareness hook
                             existing_commands = [
-                                hook.get('command', '') for hooks_group in existing_settings['hooks'][hook_type]
-                                for hook in hooks_group.get('hooks', [])
+                                hook.get("command", "")
+                                for hooks_group in existing_settings["hooks"][hook_type]
+                                for hook in hooks_group.get("hooks", [])
                             ]
-                            memory_commands = [
-                                hook.get('command', '') for hooks_group in hook_config['hooks'][hook_type]
-                                for hook in hooks_group.get('hooks', [])
+                            [
+                                hook.get("command", "")
+                                for hooks_group in hook_config["hooks"][hook_type]
+                                for hook in hooks_group.get("hooks", [])
                             ]
 
                             # Check if any existing command contains memory hook
-                            is_memory_hook = any('session-start.js' in cmd or 'session-end.js' in cmd or 'mid-conversation.js' in cmd
-                                               for cmd in existing_commands)
+                            is_memory_hook = any(
+                                "session-start.js" in cmd or "session-end.js" in cmd or "mid-conversation.js" in cmd
+                                for cmd in existing_commands
+                            )
 
                             if not is_memory_hook:
                                 conflicts.append(hook_type)
@@ -984,14 +806,14 @@ class HookInstaller:
                         self.warn("Memory awareness hooks will be added alongside existing hooks")
 
                         # Add memory hooks alongside existing ones
-                        for hook_type in hook_config['hooks']:
-                            if hook_type in existing_settings['hooks']:
-                                existing_settings['hooks'][hook_type].extend(hook_config['hooks'][hook_type])
+                        for hook_type in hook_config["hooks"]:
+                            if hook_type in existing_settings["hooks"]:
+                                existing_settings["hooks"][hook_type].extend(hook_config["hooks"][hook_type])
                             else:
-                                existing_settings['hooks'][hook_type] = hook_config['hooks'][hook_type]
+                                existing_settings["hooks"][hook_type] = hook_config["hooks"][hook_type]
                     else:
                         # No conflicts, safe to update memory awareness hooks
-                        existing_settings['hooks'].update(hook_config['hooks'])
+                        existing_settings["hooks"].update(hook_config["hooks"])
                         self.info("Updated memory awareness hooks without conflicts")
 
                     final_config = existing_settings
@@ -1005,8 +827,8 @@ class HookInstaller:
                     final_config = hook_config
 
             # Write final configuration
-            with open(settings_file, 'w', encoding='utf-8') as f:
-                json.dump(final_config, f, indent=2, ensure_ascii=False)
+            with open(settings_file, "w") as f:
+                json.dump(final_config, f, indent=2)
 
             self.success("Claude Code settings configured successfully")
             return True
@@ -1028,16 +850,18 @@ class HookInstaller:
             "utilities/project-detector.js",
             "utilities/memory-scorer.js",
             "utilities/context-formatter.js",
-            "config.json"
+            "config.json",
         ]
 
         if test_natural_triggers:
-            required_files.extend([
-                "core/mid-conversation.js",
-                "utilities/adaptive-pattern-detector.js",
-                "utilities/performance-manager.js",
-                "utilities/mcp-client.js"
-            ])
+            required_files.extend(
+                [
+                    "core/mid-conversation.js",
+                    "utilities/adaptive-pattern-detector.js",
+                    "utilities/performance-manager.js",
+                    "utilities/mcp-client.js",
+                ]
+            )
 
         missing_files = []
         for file in required_files:
@@ -1056,8 +880,7 @@ class HookInstaller:
         test_script = self.claude_hooks_dir / "core" / "session-start.js"
         if test_script.exists():
             try:
-                result = subprocess.run(['node', '--check', str(test_script)],
-                                      capture_output=True, text=True, timeout=10)
+                result = subprocess.run(["node", "--check", str(test_script)], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     self.success("Hook JavaScript syntax validation passed")
                 else:
@@ -1071,9 +894,9 @@ class HookInstaller:
         if integration_test.exists():
             try:
                 self.info("Running integration tests...")
-                result = subprocess.run(['node', str(integration_test)],
-                                      capture_output=True, text=True,
-                                      timeout=30, cwd=str(self.claude_hooks_dir))
+                result = subprocess.run(
+                    ["node", str(integration_test)], capture_output=True, text=True, timeout=30, cwd=str(self.claude_hooks_dir)
+                )
                 if result.returncode == 0:
                     self.success("Integration tests passed")
                 else:
@@ -1089,9 +912,9 @@ class HookInstaller:
             if natural_test.exists():
                 try:
                     self.info("Running Natural Memory Triggers tests...")
-                    result = subprocess.run(['node', str(natural_test)],
-                                          capture_output=True, text=True,
-                                          timeout=30, cwd=str(self.claude_hooks_dir))
+                    result = subprocess.run(
+                        ["node", str(natural_test)], capture_output=True, text=True, timeout=30, cwd=str(self.claude_hooks_dir)
+                    )
                     if result.returncode == 0:
                         self.success("Natural Memory Triggers tests passed")
                     else:
@@ -1108,7 +931,7 @@ class HookInstaller:
             directories_to_check = [
                 self.claude_hooks_dir / "core",
                 self.claude_hooks_dir / "utilities",
-                self.claude_hooks_dir / "tests"
+                self.claude_hooks_dir / "tests",
             ]
 
             for directory in directories_to_check:
@@ -1165,7 +988,7 @@ class HookInstaller:
                 "memory-mode-controller.js",
                 "test-natural-triggers.js",
                 "test-mcp-hook.js",
-                "debug-pattern-test.js"
+                "debug-pattern-test.js",
             ]
 
             # Remove utilities
@@ -1174,7 +997,7 @@ class HookInstaller:
                 "utilities/performance-manager.js",
                 "utilities/mcp-client.js",
                 "utilities/memory-client.js",
-                "utilities/tiered-conversation-monitor.js"
+                "utilities/tiered-conversation-monitor.js",
             ]
             files_to_remove.extend(utility_files)
 
@@ -1212,7 +1035,6 @@ Examples:
   python install_hooks.py                    # Install all features (default)
   python install_hooks.py --basic            # Basic hooks only
   python install_hooks.py --natural-triggers # Natural Memory Triggers only
-  python install_hooks.py --auto-capture     # Smart Auto-Capture only
   python install_hooks.py --test             # Run tests only
   python install_hooks.py --uninstall        # Remove hooks
 
@@ -1220,27 +1042,16 @@ Features:
   Basic: Session-start and session-end hooks for memory awareness
   Natural Triggers: v7.1.3 intelligent automatic memory awareness with
                    pattern detection, performance optimization, and CLI tools
-  Auto-Capture: Intelligent automatic memory capture after Edit/Write/Bash
-                operations with pattern detection (Decision/Error/Learning/etc.)
-        """
+        """,
     )
 
-    parser.add_argument('--basic', action='store_true',
-                        help='Install basic memory awareness hooks only')
-    parser.add_argument('--natural-triggers', action='store_true',
-                        help='Install Natural Memory Triggers v7.1.3 only')
-    parser.add_argument('--auto-capture', action='store_true',
-                        help='Install Smart Auto-Capture hooks only')
-    parser.add_argument('--all', action='store_true',
-                        help='Install all features (default behavior)')
-    parser.add_argument('--test', action='store_true',
-                        help='Run tests only (do not install)')
-    parser.add_argument('--uninstall', action='store_true',
-                        help='Remove installed hooks')
-    parser.add_argument('--force', action='store_true',
-                        help='Force installation even if prerequisites fail')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Show what would be installed without making changes')
+    parser.add_argument("--basic", action="store_true", help="Install basic memory awareness hooks only")
+    parser.add_argument("--natural-triggers", action="store_true", help="Install Natural Memory Triggers v7.1.3 only")
+    parser.add_argument("--all", action="store_true", help="Install all features (default behavior)")
+    parser.add_argument("--test", action="store_true", help="Run tests only (do not install)")
+    parser.add_argument("--uninstall", action="store_true", help="Remove installed hooks")
+    parser.add_argument("--force", action="store_true", help="Force installation even if prerequisites fail")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be installed without making changes")
 
     args = parser.parse_args()
 
@@ -1306,15 +1117,13 @@ Features:
     env_type = installer.detect_environment_type()
 
     # Determine what to install
-    install_all = not (args.basic or args.natural_triggers or args.auto_capture) or args.all
+    install_all = not (args.basic or args.natural_triggers) or args.all
     install_basic = args.basic or install_all
     install_natural_triggers = args.natural_triggers or install_all
-    install_auto_capture = args.auto_capture or install_all
 
-    installer.info(f"Installation plan:")
+    installer.info("Installation plan:")
     installer.info(f"  Basic hooks: {'Yes' if install_basic else 'No'}")
     installer.info(f"  Natural Memory Triggers: {'Yes' if install_natural_triggers else 'No'}")
-    installer.info(f"  Smart Auto-Capture: {'Yes' if install_auto_capture else 'No'}")
 
     if args.dry_run:
         installer.info("DRY RUN - No changes will be made")
@@ -1327,10 +1136,6 @@ Features:
             installer.info("  - Mid-conversation hooks")
             installer.info("  - Performance optimization utilities")
             installer.info("  - CLI management tools")
-        if install_auto_capture:
-            installer.info("  - Smart Auto-Capture hooks")
-            installer.info("  - Pattern detection for Decision/Error/Learning/Implementation")
-            installer.info("  - PostToolUse hook (Edit, Write, Bash)")
         return
 
     # Create backup
@@ -1348,19 +1153,16 @@ Features:
         if not installer.install_natural_triggers():
             overall_success = False
 
-    if install_auto_capture:
-        if not installer.install_auto_capture():
-            overall_success = False
-
     # Install configuration (always needed) with MCP awareness
-    if not installer.install_configuration(install_natural_triggers=install_natural_triggers,
-                                         detected_mcp=detected_mcp if use_existing_mcp else None,
-                                         env_type=env_type):
+    if not installer.install_configuration(
+        install_natural_triggers=install_natural_triggers,
+        detected_mcp=detected_mcp if use_existing_mcp else None,
+        env_type=env_type,
+    ):
         overall_success = False
 
     # Configure Claude Code settings
-    if not installer.configure_claude_settings(install_mid_conversation=install_natural_triggers,
-                                              install_auto_capture=install_auto_capture):
+    if not installer.configure_claude_settings(install_mid_conversation=install_natural_triggers):
         overall_success = False
 
     # Run tests to verify installation
@@ -1369,51 +1171,23 @@ Features:
         if installer.run_tests(test_natural_triggers=install_natural_triggers):
             installer.header("Installation Complete!")
 
-            if install_basic and install_natural_triggers and install_auto_capture:
+            if install_basic and install_natural_triggers:
                 installer.success("Complete Claude Code memory awareness system installed")
                 installer.info("Features available:")
                 installer.info("  ✅ Session-start and session-end hooks")
                 installer.info("  ✅ Natural Memory Triggers with intelligent pattern detection")
                 installer.info("  ✅ Mid-conversation memory injection")
-                installer.info("  ✅ Smart Auto-Capture (PostToolUse for Edit/Write/Bash)")
                 installer.info("  ✅ Performance optimization and CLI management")
                 installer.info("")
                 installer.info("CLI Management:")
                 installer.info(f"  node {installer.claude_hooks_dir}/memory-mode-controller.js status")
                 installer.info(f"  node {installer.claude_hooks_dir}/memory-mode-controller.js profile balanced")
-                installer.info("")
-                installer.info("Auto-Capture User Overrides:")
-                installer.info("  #remember - Force capture this conversation")
-                installer.info("  #skip     - Skip auto-capture for this message")
-            elif install_basic and install_natural_triggers:
-                installer.success("Memory awareness system installed (without auto-capture)")
-                installer.info("Features available:")
-                installer.info("  ✅ Session-start and session-end hooks")
-                installer.info("  ✅ Natural Memory Triggers with intelligent pattern detection")
-                installer.info("  ✅ Mid-conversation memory injection")
-                installer.info("  ✅ Performance optimization and CLI management")
-            elif install_auto_capture:
-                installer.success("Smart Auto-Capture hooks installed")
-                installer.info("Auto-capture enabled for Edit/Write/Bash operations")
-                installer.info("Pattern detection: Decision/Error/Learning/Implementation/Important/Code")
-                installer.info("")
-                installer.info("User Overrides:")
-                installer.info("  #remember - Force capture this conversation")
-                installer.info("  #skip     - Skip auto-capture for this message")
             elif install_natural_triggers:
                 installer.success("Natural Memory Triggers v7.1.3 installed")
                 installer.info("Advanced memory awareness features available")
             elif install_basic:
                 installer.success("Basic memory awareness hooks installed")
                 installer.info("Session-based memory awareness enabled")
-
-            # Code execution enabled message (applies to all installation types)
-            installer.info("")
-            installer.success("Code Execution Interface enabled by default")
-            installer.info("  ✅ 75-90% token reduction")
-            installer.info("  ✅ Automatic MCP fallback")
-            installer.info("  ✅ Zero breaking changes")
-            installer.info("  ℹ️  Disable in ~/.claude/hooks/config.json if needed")
 
         else:
             installer.warn("Installation completed but some tests failed")

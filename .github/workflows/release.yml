@@ -1,45 +1,98 @@
-name: Release (Manual)
+name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    concurrency: release
-    permissions:
-      id-token: write
-      contents: write
-      actions: write
-      pull-requests: write
-      repository-projects: write
-
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-    - uses: actions/checkout@v3 # would probably be better to use v4
-      with:
-        fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PEM }}
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9' # this setup python action uses a separate version than the python-semantic-release, thats why we had the error
+      - uses: googleapis/release-please-action@c3fc4de07084f75a2b61a5b933069bda6edf3d5c # v4
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install build hatchling python-semantic-release
+  publish:
+    needs: release
+    if: ${{ needs.release.outputs.release_created }}
+    runs-on: lab
+    strategy:
+      matrix:
+        include:
+          - variant: cpu
+            target: full
+            cuda_enabled: "false"
+            platforms: linux/amd64
+            suffix: ""  # Default tag (no suffix) is CPU full image
+          - variant: slim
+            target: slim
+            cuda_enabled: "false"
+            platforms: linux/amd64
+            suffix: "-slim"  # Thin image: ghcr.io/.../mcp-memory-service:latest-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-    - name: Verify build module installation
-      run: python -m pip show build
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build package
-      run: python -m build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-    - name: Python Semantic Release
-      uses: python-semantic-release/python-semantic-release@v9.14.0
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        verbosity: 2
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}${{ matrix.suffix }},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}${{ matrix.suffix }},value=${{ needs.release.outputs.version }}
+            type=raw,value=latest${{ matrix.suffix }}
+
+      - name: Build and push (${{ matrix.variant }})
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_ENABLED=${{ matrix.cuda_enabled }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-${{ matrix.variant }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-${{ matrix.variant }},mode=max

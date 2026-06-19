@@ -1,716 +1,767 @@
 #!/usr/bin/env python3
-"""
-FastAPI MCP Server for Memory Service
+"""FastAPI MCP Server for Memory Service.
 
-This module implements a native MCP server using the FastAPI MCP framework,
-replacing the Node.js HTTP-to-MCP bridge to resolve SSL connectivity issues
-and provide direct MCP protocol support.
-
-Features:
-- Native MCP protocol implementation using FastMCP
-- Direct integration with existing memory storage backends
-- Streamable HTTP transport for remote access
-- All 22 core memory operations (excluding dashboard tools)
-- SSL/HTTPS support with proper certificate handling
+Native MCP protocol implementation using FastMCP with Pydantic-validated
+tool inputs.  Each tool handler constructs an input model for validation,
+removing all inline range clamping, mode checking, and required-field logic.
 """
 
-import asyncio
 import logging
 import os
-import socket
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union, TypedDict
-try:
-    from typing import NotRequired  # Python 3.11+
-except ImportError:
-    from typing_extensions import NotRequired  # Python 3.10
+from typing import Any
+
+from pydantic import ValidationError
 
 # Add src to path for imports
 current_dir = Path(__file__).parent
 src_dir = current_dir.parent.parent
 sys.path.insert(0, str(src_dir))
 
-# FastMCP is not available in current MCP library version
-# This module is kept for future compatibility
-try:
-    from mcp.server.fastmcp import FastMCP, Context
-except ImportError:
-    logger_temp = logging.getLogger(__name__)
-    logger_temp.warning("FastMCP not available in mcp library - mcp_server module cannot be used")
-    
-    # Create dummy objects for graceful degradation
-    class _DummyFastMCP:
-        def tool(self):
-            """Dummy decorator that does nothing."""
-            def decorator(func):
-                return func
-            return decorator
-    
-    FastMCP = _DummyFastMCP  # type: ignore
-    Context = None  # type: ignore
-
-from mcp.types import TextContent
+from fastmcp import Context, FastMCP  # noqa: E402
 
 # Import existing memory service components
-from .config import (
-    STORAGE_BACKEND,
-    CONSOLIDATION_ENABLED, EMBEDDING_MODEL_NAME, INCLUDE_HOSTNAME,
-    SQLITE_VEC_PATH,
-    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_VECTORIZE_INDEX,
-    CLOUDFLARE_D1_DATABASE_ID, CLOUDFLARE_R2_BUCKET, CLOUDFLARE_EMBEDDING_MODEL,
-    CLOUDFLARE_LARGE_CONTENT_THRESHOLD, CLOUDFLARE_MAX_RETRIES, CLOUDFLARE_BASE_DELAY,
-    HYBRID_SYNC_INTERVAL, HYBRID_BATCH_SIZE, HYBRID_MAX_QUEUE_SIZE,
-    HYBRID_SYNC_ON_STARTUP, HYBRID_FALLBACK_TO_PRIMARY,
-    CONTENT_PRESERVE_BOUNDARIES, CONTENT_SPLIT_OVERLAP, ENABLE_AUTO_SPLIT
+from .formatters.toon import format_search_results_as_toon  # noqa: E402
+from .models.mcp_inputs import (  # noqa: E402
+    ContradictionsParams,
+    DeleteMemoryParams,
+    FindDuplicatesParams,
+    MergeDuplicatesParams,
+    RelationParams,
+    SearchParams,
+    StoreMemoryParams,
+    SupersedeParams,
 )
-from .storage.base import MemoryStorage
-from .services.memory_service import MemoryService
+from .models.validators import normalize_tags  # noqa: E402
+from .resources.toon_documentation import TOON_FORMAT_DOCUMENTATION  # noqa: E402
+from .services.memory_service import MemoryService  # noqa: E402
+from .storage.base import MemoryStorage  # noqa: E402
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)  # Default to INFO level
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# GLOBAL CACHING FOR MCP SERVER PERFORMANCE OPTIMIZATION
-# =============================================================================
-# Module-level caches to persist storage/service instances across stateless HTTP calls.
-# This reduces initialization overhead from ~1,810ms to <400ms on cache hits.
-#
-# Cache Keys:
-# - Storage: "{backend_type}:{db_path}" (e.g., "sqlite_vec:/path/to/db")
-# - MemoryService: storage instance ID (id(storage))
-#
-# Thread Safety:
-# - Uses asyncio.Lock to prevent race conditions during concurrent access
-#
-# Lifecycle:
-# - Cached instances persist for the lifetime of the Python process
-# - NOT cleared between stateless HTTP calls (intentional for performance)
-# - Cleaned up on process shutdown via lifespan context manager
 
-_STORAGE_CACHE: Dict[str, MemoryStorage] = {}
-_MEMORY_SERVICE_CACHE: Dict[int, MemoryService] = {}
-_CACHE_LOCK: Optional[asyncio.Lock] = None  # Initialized on first use
-_CACHE_STATS = {
-    "storage_hits": 0,
-    "storage_misses": 0,
-    "service_hits": 0,
-    "service_misses": 0,
-    "total_calls": 0,
-    "initialization_times": []  # Track initialization durations for cache misses
-}
+def _latency_enabled() -> bool:
+    """Check if latency metrics are enabled (lazy, reads config once per call)."""
+    from .config import settings
 
-def _get_cache_lock() -> asyncio.Lock:
-    """Get or create the global cache lock (lazy initialization to avoid event loop issues)."""
-    global _CACHE_LOCK
-    if _CACHE_LOCK is None:
-        _CACHE_LOCK = asyncio.Lock()
-    return _CACHE_LOCK
+    return settings.debug.latency_metrics
 
-def _get_or_create_memory_service(storage: MemoryStorage) -> MemoryService:
+
+def _inject_latency(response: dict[str, Any] | str, start: float) -> dict[str, Any] | str:
+    """Inject latency_ms into a response if metrics are enabled.
+
+    For dict responses: adds 'latency_ms' key.
+    For TOON strings: prepends '# latency_ms=N.N' comment line.
     """
-    Get cached MemoryService or create new one.
+    if not _latency_enabled():
+        return response
+    elapsed = round((time.perf_counter() - start) * 1000, 1)
+    if isinstance(response, dict):
+        response["latency_ms"] = elapsed
+        return response
+    return f"# latency_ms={elapsed}\n{response}"
 
-    Args:
-        storage: Storage instance to use as cache key
-
-    Returns:
-        MemoryService instance (cached or newly created)
-    """
-    storage_id = id(storage)
-    if storage_id in _MEMORY_SERVICE_CACHE:
-        memory_service = _MEMORY_SERVICE_CACHE[storage_id]
-        _CACHE_STATS["service_hits"] += 1
-        logger.info(f"✅ MemoryService Cache HIT - Reusing service instance (storage_id: {storage_id})")
-    else:
-        _CACHE_STATS["service_misses"] += 1
-        logger.info(f"❌ MemoryService Cache MISS - Creating new service instance...")
-
-        # Initialize memory service with shared business logic
-        memory_service = MemoryService(storage)
-
-        # Cache the memory service instance
-        _MEMORY_SERVICE_CACHE[storage_id] = memory_service
-        logger.info(f"💾 Cached MemoryService instance (storage_id: {storage_id})")
-
-    return memory_service
-
-def _log_cache_performance(start_time: float) -> None:
-    """
-    Log comprehensive cache performance statistics.
-
-    Args:
-        start_time: Timer start time to calculate total elapsed time
-    """
-    total_time = (time.time() - start_time) * 1000
-    cache_hit_rate = (
-        (_CACHE_STATS["storage_hits"] + _CACHE_STATS["service_hits"]) /
-        (_CACHE_STATS["total_calls"] * 2)  # 2 caches per call
-    ) * 100
-
-    logger.info(
-        f"📊 Cache Stats - "
-        f"Hit Rate: {cache_hit_rate:.1f}% | "
-        f"Storage: {_CACHE_STATS['storage_hits']}H/{_CACHE_STATS['storage_misses']}M | "
-        f"Service: {_CACHE_STATS['service_hits']}H/{_CACHE_STATS['service_misses']}M | "
-        f"Total Time: {total_time:.1f}ms | "
-        f"Cache Size: {len(_STORAGE_CACHE)} storage + {len(_MEMORY_SERVICE_CACHE)} services"
-    )
 
 @dataclass
 class MCPServerContext:
     """Application context for the MCP server with all required components."""
+
     storage: MemoryStorage
     memory_service: MemoryService
 
+
 @asynccontextmanager
 async def mcp_server_lifespan(server: FastMCP) -> AsyncIterator[MCPServerContext]:
-    """
-    Manage MCP server lifecycle with global caching for performance optimization.
+    """Manage MCP server lifecycle with proper resource initialization and cleanup."""
 
-    Performance Impact:
-    - Cache HIT: ~200-400ms (reuses existing instances)
-    - Cache MISS: ~1,810ms (initializes new instances)
+    # Register optional three-tier tools before accepting requests
+    _maybe_register_three_tier_tools()
 
-    Caching Strategy:
-    - Storage instances cached by "{backend}:{path}" key
-    - MemoryService instances cached by storage ID
-    - Thread-safe with asyncio.Lock
-    - Persists across stateless HTTP calls (by design)
-    """
-    global _STORAGE_CACHE, _MEMORY_SERVICE_CACHE, _CACHE_STATS
+    # StorageManager.get_storage() is idempotent: returns cached instance if
+    # already initialized (e.g. by unified_server), otherwise initializes
+    # storage + graph layer + write queue in one shot.
+    from .shared_storage import get_shared_storage
 
-    # Track call statistics
-    _CACHE_STATS["total_calls"] += 1
-    start_time = time.time()
+    storage = await get_shared_storage()
 
-    logger.info(f"🔄 MCP Server Call #{_CACHE_STATS['total_calls']} - Checking global cache...")
+    # Initialize memory service with shared business logic
+    from .shared_storage import get_embedding_provider, get_graph_client, get_write_queue
 
-    # Acquire lock for thread-safe cache access
-    cache_lock = _get_cache_lock()
-    async with cache_lock:
-        # Generate cache key for storage backend
-        cache_key = f"{STORAGE_BACKEND}:{SQLITE_VEC_PATH}"
-
-        # Check storage cache
-        if cache_key in _STORAGE_CACHE:
-            storage = _STORAGE_CACHE[cache_key]
-            _CACHE_STATS["storage_hits"] += 1
-            logger.info(f"✅ Storage Cache HIT - Reusing {STORAGE_BACKEND} instance (key: {cache_key})")
-        else:
-            _CACHE_STATS["storage_misses"] += 1
-            logger.info(f"❌ Storage Cache MISS - Initializing {STORAGE_BACKEND} instance...")
-
-            # Initialize storage backend using shared factory
-            from .storage.factory import create_storage_instance
-            storage = await create_storage_instance(SQLITE_VEC_PATH, server_type="mcp")
-
-            # Cache the storage instance
-            _STORAGE_CACHE[cache_key] = storage
-            init_time = (time.time() - start_time) * 1000  # Convert to ms
-            _CACHE_STATS["initialization_times"].append(init_time)
-            logger.info(f"💾 Cached storage instance (key: {cache_key}, init_time: {init_time:.1f}ms)")
-
-        # Check memory service cache and log performance
-        memory_service = _get_or_create_memory_service(storage)
-        _log_cache_performance(start_time)
+    memory_service = MemoryService(
+        storage,
+        graph_client=get_graph_client(),
+        write_queue=get_write_queue(),
+        embedding_provider=get_embedding_provider(),
+    )
 
     try:
-        yield MCPServerContext(
-            storage=storage,
-            memory_service=memory_service
-        )
+        yield MCPServerContext(storage=storage, memory_service=memory_service)
     finally:
-        # IMPORTANT: Do NOT close cached storage instances here!
-        # They are intentionally kept alive across stateless HTTP calls for performance.
-        # Cleanup only happens on process shutdown (handled by FastMCP framework).
-        logger.info(f"✅ MCP Server Call #{_CACHE_STATS['total_calls']} complete - Cached instances preserved")
+        # Idempotent — drains Hebbian write queue, closes graph + storage.
+        # Safe to call even if unified_server already called it.
+        from .shared_storage import close_shared_storage
+
+        await close_shared_storage()
+
 
 # Create FastMCP server instance
-try:
-    mcp = FastMCP(
-        name="MCP Memory Service", 
-        host="0.0.0.0",  # Listen on all interfaces for remote access
-        port=8000,       # Default port
-        lifespan=mcp_server_lifespan,
-        stateless_http=True  # Enable stateless HTTP for Claude Code compatibility
-    )
-except TypeError:
-    # FastMCP not available - create dummy instance
-    mcp = _DummyFastMCP()  # type: ignore
+mcp = FastMCP("MCP Memory Service", lifespan=mcp_server_lifespan)
+
 
 # =============================================================================
-# TYPE DEFINITIONS
+# RESOURCES
 # =============================================================================
 
-class StoreMemorySuccess(TypedDict):
-    """Return type for successful single memory storage."""
-    success: bool
-    message: str
-    content_hash: str
 
-class StoreMemorySplitSuccess(TypedDict):
-    """Return type for successful chunked memory storage."""
-    success: bool
-    message: str
-    chunks_created: int
-    chunk_hashes: List[str]
+@mcp.resource("toon://format/documentation")
+def toon_format_docs() -> str:
+    """Return comprehensive TOON format specification for LLM consumption."""
+    return TOON_FORMAT_DOCUMENTATION
 
-class StoreMemoryFailure(TypedDict):
-    """Return type for failed memory storage."""
-    success: bool
-    message: str
-    chunks_created: NotRequired[int]
-    chunk_hashes: NotRequired[List[str]]
 
 # =============================================================================
 # CORE MEMORY OPERATIONS
 # =============================================================================
 
+
 @mcp.tool()
 async def store_memory(
     content: str,
     ctx: Context,
-    tags: Union[str, List[str], None] = None,
+    tags: str | list[str] | None = None,
     memory_type: str = "note",
-    metadata: Optional[Dict[str, Any]] = None,
-    client_hostname: Optional[str] = None
-) -> Union[StoreMemorySuccess, StoreMemorySplitSuccess, StoreMemoryFailure]:
-    """Store new information in persistent memory with semantic search capabilities and optional categorization.
+    metadata: dict[str, Any] | None = None,
+    client_hostname: str | None = None,
+    summary: str | None = None,
+) -> dict[str, Any]:
+    """Store a new memory for future semantic retrieval.
 
-USE THIS WHEN:
-- User provides information to remember for future sessions (decisions, preferences, facts, code snippets)
-- Capturing important context from current conversation ("remember this for later")
-- User explicitly says "remember", "save", "store", "keep this", "note that"
-- Documenting technical decisions, API patterns, project architecture, user preferences
-- Creating knowledge base entries, documentation snippets, troubleshooting notes
+    Content is vectorized for similarity search. Emotional valence, salience scoring,
+    and contradiction detection are computed automatically.
 
-THIS IS THE PRIMARY STORAGE TOOL - use it whenever information should persist beyond the current session.
-
-DO NOT USE FOR:
-- Temporary conversation context (use native conversation history instead)
-- Information already stored (check first with retrieve_memory to avoid duplicates)
-- Streaming or real-time data that changes frequently
-
-CONTENT LENGTH LIMITS:
-- Cloudflare/Hybrid backends: 800 characters max (auto-splits into chunks if exceeded)
-- SQLite-vec backend: No limit
-- Auto-chunking preserves context with 50-character overlap at natural boundaries
-
-TAG FORMATS (all supported):
-- Array: ["tag1", "tag2"]
-- String: "tag1,tag2"
-- Single: "single-tag"
-- Both tags parameter AND metadata.tags are merged automatically
-
-RETURNS:
-- success: Boolean indicating storage status
-- message: Status message
-- content_hash: Unique identifier for retrieval/deletion (single memory)
-- chunks_created: Number of chunks (if content was split)
-- chunk_hashes: Array of hashes (if content was split)
-
-Examples:
-{
-    "content": "User prefers async/await over callbacks in Python projects",
-    "metadata": {
-        "tags": ["coding-style", "python", "preferences"],
-        "type": "preference"
-    }
-}
-
-{
-    "content": "API endpoint /api/v1/users requires JWT token in Authorization header",
-    "metadata": {
-        "tags": "api-documentation,authentication",
-        "type": "reference"
-    }
-}
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    result = await memory_service.store_memory(
-        content=content,
-        tags=tags,
-        memory_type=memory_type,
-        metadata=metadata,
-        client_hostname=client_hostname
-    )
-
-    # Transform MemoryService response to MCP tool format
-    if not result.get("success"):
-        return StoreMemoryFailure(
-            success=False,
-            message=result.get("error", "Failed to store memory")
-        )
-
-    # Handle chunked response (multiple memories)
-    if "memories" in result:
-        chunk_hashes = [mem["content_hash"] for mem in result["memories"]]
-        return StoreMemorySplitSuccess(
-            success=True,
-            message=f"Successfully stored {len(result['memories'])} memory chunks",
-            chunks_created=result["total_chunks"],
-            chunk_hashes=chunk_hashes
-        )
-
-    # Handle single memory response
-    memory_data = result["memory"]
-    return StoreMemorySuccess(
-        success=True,
-        message="Memory stored successfully",
-        content_hash=memory_data["content_hash"]
-    )
-
-@mcp.tool()
-async def retrieve_memory(
-    query: str,
-    ctx: Context,
-    n_results: int = 5
-) -> Dict[str, Any]:
-    """Search stored memories using semantic similarity - finds conceptually related content even if exact words differ.
-
-USE THIS WHEN:
-- User asks "what do you remember about X", "do we have info on Y", "recall Z"
-- Looking for past decisions, preferences, or context from previous sessions
-- Need to retrieve related information without exact wording (semantic search)
-- General memory lookup where time frame is NOT specified
-- User references "last time we discussed", "you should know", "I told you before"
-
-THIS IS THE PRIMARY SEARCH TOOL - use it for most memory lookups.
-
-DO NOT USE FOR:
-- Time-based queries ("yesterday", "last week") - use recall_memory instead
-- Exact content matching - use exact_match_retrieve instead
-- Tag-based filtering - use search_by_tag instead
-- Browsing all memories - use list_memories instead (if available in mcp_server.py)
-
-HOW IT WORKS:
-- Converts query to vector embedding using the same model as stored memories
-- Finds top N most similar memories using cosine similarity
-- Returns ranked by relevance score (0.0-1.0, higher is more similar)
-- Works across sessions - retrieves memories from any time period
-
-RETURNS:
-- Array of matching memories with:
-  - content: The stored text
-  - content_hash: Unique identifier
-  - similarity_score: Relevance score (0.0-1.0)
-  - metadata: Tags, type, timestamp, etc.
-  - created_at: When memory was stored
-
-Examples:
-{
-    "query": "python async patterns we discussed",
-    "n_results": 5
-}
-
-{
-    "query": "database connection settings",
-    "n_results": 10
-}
-
-{
-    "query": "user authentication workflow preferences",
-    "n_results": 3
-}
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    return await memory_service.retrieve_memories(
-        query=query,
-        n_results=n_results
-    )
-
-@mcp.tool()
-async def search_by_tag(
-    tags: Union[str, List[str]],
-    ctx: Context,
-    match_all: bool = False
-) -> Dict[str, Any]:
-    """Search memories by exact tag matching - retrieves all memories categorized with specific tags (OR logic by default).
-
-USE THIS WHEN:
-- User asks to filter by category ("show me all 'api-docs' memories", "find 'important' notes")
-- Need to retrieve memories of a specific type without semantic search
-- User wants to browse a category ("what do we have tagged 'python'")
-- Looking for all memories with a particular classification
-- User says "show me everything about X" where X is a known tag
-
-DO NOT USE FOR:
-- Semantic search - use retrieve_memory instead
-- Time-based queries - use recall_memory instead
-- Finding specific content - use exact_match_retrieve instead
-
-HOW IT WORKS:
-- Exact string matching on memory tags (case-sensitive)
-- Returns memories matching ANY of the specified tags (OR logic)
-- No semantic search - purely categorical filtering
-- No similarity scoring - all results are equally relevant
-
-TAG FORMATS (all supported):
-- Array: ["tag1", "tag2"]
-- String: "tag1,tag2"
-
-RETURNS:
-- Array of all memories with matching tags:
-  - content: The stored text
-  - tags: Array of tags (will include at least one from search)
-  - content_hash: Unique identifier
-  - metadata: Additional memory metadata
-  - No similarity score (categorical match, not semantic)
-
-Examples:
-{
-    "tags": ["important", "reference"]
-}
-
-{
-    "tags": "python,async,best-practices"
-}
-
-{
-    "tags": ["api-documentation"]
-}
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    return await memory_service.search_by_tag(
-        tags=tags,
-        match_all=match_all
-    )
-
-@mcp.tool()
-async def delete_memory(
-    content_hash: str,
-    ctx: Context
-) -> Dict[str, Union[bool, str]]:
-    """Delete a specific memory by its unique content hash identifier - permanent removal of a single memory entry.
-
-USE THIS WHEN:
-- User explicitly requests deletion of a specific memory ("delete that", "remove the memory about X")
-- After showing user a memory and they want it removed
-- Correcting mistakenly stored information
-- User says "forget about X", "delete the note about Y", "remove that memory"
-- Have the content_hash from a previous retrieve/search operation
-
-DO NOT USE FOR:
-- Deleting multiple memories - use delete_by_tag, delete_by_tags, or delete_by_all_tags instead
-- Deleting by content without hash - search first with retrieve_memory to get the hash
-- Bulk cleanup - use cleanup_duplicates or delete_by_tag instead
-- Time-based deletion - use delete_by_timeframe or delete_before_date instead
-
-IMPORTANT:
-- This is a PERMANENT operation - memory cannot be recovered after deletion
-- You must have the exact content_hash (obtained from search/retrieve operations)
-- Only deletes the single memory matching the hash
-
-HOW TO GET content_hash:
-1. First search for the memory using retrieve_memory, recall_memory, or search_by_tag
-2. Memory results include "content_hash" field
-3. Use that hash in this delete operation
-
-RETURNS:
-- success: Boolean indicating if deletion succeeded
-- content_hash: The hash of the deleted memory
-- error: Error message (only present if success is False)
-
-Examples:
-# Step 1: Find the memory
-retrieve_memory(query: "outdated API documentation")
-# Returns: [{content_hash: "a1b2c3d4e5f6...", content: "...", ...}]
-
-# Step 2: Delete it
-{
-    "content_hash": "a1b2c3d4e5f6..."
-}
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    return await memory_service.delete_memory(content_hash)
-
-@mcp.tool()
-async def check_database_health(ctx: Context) -> Dict[str, Any]:
-    """Check database health, storage backend status, and retrieve comprehensive memory service statistics.
-
-USE THIS WHEN:
-- User asks "how many memories are stored", "is the database working", "memory service status"
-- Diagnosing performance issues or connection problems
-- User wants to know storage backend configuration (SQLite/Cloudflare/Hybrid)
-- Checking if memory service is functioning correctly
-- Need to verify successful initialization or troubleshoot errors
-- User asks "what storage backend are we using"
-
-DO NOT USE FOR:
-- Searching or retrieving specific memories - use retrieve_memory instead
-- Getting cache performance stats - use get_cache_stats instead (if available)
-- Listing actual memory content - this only returns counts and status
-
-WHAT IT CHECKS:
-- Database connectivity and responsiveness
-- Storage backend type (sqlite_vec, cloudflare, hybrid)
-- Total memory count in database
-- Database file size and location (for SQLite backends)
-- Sync status (for hybrid backend)
-- Configuration details (embedding model, index names, etc.)
-
-RETURNS:
-- status: "healthy" or error status
-- backend: Storage backend type (sqlite_vec/cloudflare/hybrid)
-- total_memories: Count of stored memories
-- database_info: Path, size, configuration details
-- timestamp: When health check was performed
-- Any error messages or warnings
-
-Examples:
-No parameters required - just call it:
-{}
-
-Common use cases:
-- User: "How many memories do I have?" → check_database_health()
-- User: "Is the memory service working?" → check_database_health()
-- User: "What backend are we using?" → check_database_health()
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    return await memory_service.health_check()
-
-@mcp.tool()
-async def list_memories(
-    ctx: Context,
-    page: int = 1,
-    page_size: int = 10,
-    tag: Optional[str] = None,
-    memory_type: Optional[str] = None
-) -> Dict[str, Any]:
-    """List stored memories with pagination and optional filtering - browse all memories in pages rather than searching.
-
-USE THIS WHEN:
-- User wants to browse/explore all memories ("show me my memories", "list everything")
-- Need to paginate through large result sets
-- Filtering by tag OR memory type for categorical browsing
-- User asks "what do I have stored", "show me all notes", "browse my memories"
-- Want to see memories without searching for specific content
-
-DO NOT USE FOR:
-- Searching for specific content - use retrieve_memory instead
-- Time-based queries - use recall_memory instead
-- Finding exact text - use exact_match_retrieve instead
-
-HOW IT WORKS:
-- Returns memories in pages (default 10 per page)
-- Optional filtering by single tag or memory type
-- Sorted by creation time (newest first)
-- Supports pagination through large datasets
-
-PAGINATION:
-- page: 1-based page number (default 1)
-- page_size: Number of results per page (default 10, max usually 100)
-- Returns total count and page info for navigation
-
-RETURNS:
-- memories: Array of memory objects for current page
-- total: Total count of matching memories
-- page: Current page number
-- page_size: Results per page
-- total_pages: Total pages available
-
-Examples:
-{
-    "page": 1,
-    "page_size": 10
-}
-
-{
-    "page": 2,
-    "page_size": 20,
-    "tag": "python"
-}
-
-{
-    "page": 1,
-    "page_size": 50,
-    "memory_type": "decision"
-}
-    """
-    # Delegate to shared MemoryService business logic
-    memory_service = ctx.request_context.lifespan_context.memory_service
-    return await memory_service.list_memories(
-        page=page,
-        page_size=page_size,
-        tag=tag,
-        memory_type=memory_type
-    )
-
-@mcp.tool()
-async def get_cache_stats(ctx: Context) -> Dict[str, Any]:
-    """
-    Get MCP server global cache statistics for performance monitoring.
-
-    Returns detailed metrics about storage and memory service caching,
-    including hit rates, initialization times, and cache sizes.
-
-    This tool is useful for:
-    - Monitoring cache effectiveness
-    - Debugging performance issues
-    - Verifying cache persistence across stateless HTTP calls
+    Args:
+        content: Text to store (embedded for semantic search)
+        tags: Labels — accepts ["tag1", "tag2"] or "tag1,tag2"
+        memory_type: Classification — "note", "decision", "task", or "reference"
+        metadata: Structured data to attach. Special key: importance (float 0.0-1.0)
+        client_hostname: Source machine identifier
+        summary: One-line summary (~50 tokens). Auto-generated if omitted.
 
     Returns:
-        Dictionary with cache statistics:
-        - total_calls: Total MCP server invocations
-        - hit_rate: Overall cache hit rate percentage
-        - storage_cache: Storage cache metrics (hits/misses/size)
-        - service_cache: MemoryService cache metrics (hits/misses/size)
-        - performance: Initialization time statistics (avg/min/max)
-        - backend_info: Current storage backend configuration
+        {success, content_hash, message} or {success, chunks_created, chunk_hashes} if auto-split.
+        May include interference dict if contradictions detected.
     """
-    global _CACHE_STATS, _STORAGE_CACHE, _MEMORY_SERVICE_CACHE
+    _t0 = time.perf_counter()
 
-    # Import shared stats calculation utility
-    from mcp_memory_service.utils.cache_manager import CacheStats, calculate_cache_stats_dict
+    try:
+        params = StoreMemoryParams(
+            content=content,
+            tags=tags,
+            memory_type=memory_type,
+            metadata=metadata,
+            client_hostname=client_hostname,
+            summary=summary,
+        )
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
 
-    # Convert global dict to CacheStats dataclass
-    stats = CacheStats(
-        total_calls=_CACHE_STATS["total_calls"],
-        storage_hits=_CACHE_STATS["storage_hits"],
-        storage_misses=_CACHE_STATS["storage_misses"],
-        service_hits=_CACHE_STATS["service_hits"],
-        service_misses=_CACHE_STATS["service_misses"],
-        initialization_times=_CACHE_STATS["initialization_times"]
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.store_memory(
+        content=params.content,
+        tags=params.tags or None,
+        memory_type=params.memory_type,
+        metadata=params.metadata,
+        client_hostname=params.client_hostname,
+        summary=params.summary,
     )
 
-    # Calculate statistics using shared utility
-    cache_sizes = (len(_STORAGE_CACHE), len(_MEMORY_SERVICE_CACHE))
-    result = calculate_cache_stats_dict(stats, cache_sizes)
+    # Transform service response to MCP wire format
+    if result["success"]:
+        interference = result.get("interference")
 
-    # Add server-specific details
-    result["storage_cache"]["keys"] = list(_STORAGE_CACHE.keys())
-    result["backend_info"]["embedding_model"] = EMBEDDING_MODEL_NAME
+        if "memory" in result:
+            response: dict[str, Any] = {
+                "success": True,
+                "message": "Memory stored successfully",
+                "content_hash": result["memory"]["content_hash"],
+            }
+            if interference:
+                response["interference"] = interference
+            return _inject_latency(response, _t0)
+        elif "memories" in result:
+            chunk_hashes = [m["content_hash"] for m in result["memories"]]
+            response = {
+                "success": True,
+                "message": f"Memory stored as {result['total_chunks']} chunks",
+                "chunks_created": result["total_chunks"],
+                "chunk_hashes": chunk_hashes,
+            }
+            if interference:
+                response["interference"] = interference
+            return _inject_latency(response, _t0)
 
-    return result
+    return _inject_latency(
+        {"success": False, "error": result.get("error", "Unknown error occurred")},
+        _t0,
+    )
 
+
+@mcp.tool()
+async def search(
+    ctx: Context,
+    query: str = "",
+    mode: str = "hybrid",
+    tags: str | list[str] | None = None,
+    match_all: bool = False,
+    k: int = 10,
+    page: int = 1,
+    page_size: int = 10,
+    min_similarity: float = 0.3,
+    output: str = "full",
+    memory_type: str | None = None,
+    encoding_context: dict[str, Any] | None = None,
+    include_superseded: bool = False,
+    min_trust_score: float | None = None,
+) -> str | dict[str, Any]:
+    """Search and retrieve memories. Consolidates all retrieval modes into one tool.
+
+    Args:
+        query: Natural language search query (required for hybrid/scan/similar modes)
+        mode: Search strategy:
+            - "hybrid" (default): Semantic + tag-boosted search. Best for most queries.
+            - "scan": Like hybrid but returns ~50-token summaries (cheap triage).
+            - "similar": Pure k-NN vector search, no tag boosting. For duplicate detection.
+            - "tag": Exact tag matching. Requires `tags` param.
+            - "recent": Chronological (newest first). Optional tag/memory_type filter.
+        tags: Tags to filter by (for "tag" mode, or optional boost hints for "hybrid")
+        match_all: For "tag" mode — True=AND, False=OR (default: OR)
+        k: Max results for "scan" and "similar" modes (default: 10)
+        page: Page number, 1-indexed (default: 1)
+        page_size: Results per page (default: 10, max: 100)
+        min_similarity: Similarity threshold 0.0-1.0 (default: 0.3). Higher=stricter.
+        output: "full" (default), "summary" (token-efficient ~50-token summaries), or "both". Applies to scan mode.
+        memory_type: Filter by type for "recent" mode (note/decision/task/reference)
+        encoding_context: Context-dependent retrieval boost (time_of_day, day_type, agent, task_tags)
+        include_superseded: If True, include superseded memories in results (default: False)
+        min_trust_score: Filter by minimum provenance trust score (0.0-1.0). Memories without
+            provenance are treated as 0.5. Useful for filtering low-reliability sources.
+
+    Returns:
+        hybrid/tag/recent: TOON-formatted string (pipe-delimited, with pagination header).
+        scan/similar: dict with results list and metadata.
+    """
+    _t0 = time.perf_counter()
+
+    # Validate all inputs via Pydantic model
+    try:
+        params = SearchParams(
+            query=query,
+            mode=mode,
+            tags=tags,
+            match_all=match_all,
+            k=k,
+            page=page,
+            page_size=page_size,
+            min_similarity=min_similarity,
+            output=output,
+            memory_type=memory_type,
+            encoding_context=encoding_context,
+            include_superseded=include_superseded,
+            min_trust_score=min_trust_score,
+        )
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+
+    if params.mode == "scan":
+        result = await memory_service.scan_memories(
+            query=params.query,
+            n_results=params.k,
+            min_relevance=params.min_similarity,
+            output_format=params.output,
+        )
+        return _inject_latency(result, _t0)
+
+    if params.mode == "similar":
+        result = await memory_service.find_similar_memories(query=params.query, k=params.k)
+        return _inject_latency(result, _t0)
+
+    if params.mode == "tag":
+        if not params.tags:
+            return _inject_latency({"success": False, "error": "tags parameter required for tag mode"}, _t0)
+        result = await memory_service.search_by_tag(
+            tags=params.tags,
+            match_all=params.match_all,
+            page=params.page,
+            page_size=params.page_size,
+        )
+    elif params.mode == "recent":
+        if len(params.tags) > 1:
+            logger.warning("recent mode only supports a single tag filter; using first tag '%s'", params.tags[0])
+        tag_filter = params.tags[0] if params.tags else None
+        result = await memory_service.list_memories(
+            page=params.page,
+            page_size=params.page_size,
+            tag=tag_filter,
+            memory_type=params.memory_type,
+        )
+    else:
+        # hybrid search
+        result = await memory_service.retrieve_memories(
+            query=params.query,
+            page=params.page,
+            page_size=params.page_size,
+            min_similarity=params.min_similarity,
+            encoding_context=params.encoding_context,
+            tags=params.tags or None,
+            include_superseded=params.include_superseded,
+            min_trust_score=params.min_trust_score,
+        )
+
+    memories = result.get("memories")
+    if memories is None or "error" in result:
+        return _inject_latency(result, _t0)
+
+    pagination = {
+        "page": result.get("page", params.page),
+        "total": result.get("total", 0),
+        "page_size": result.get("page_size", params.page_size),
+        "has_more": result.get("has_more", False),
+        "total_pages": result.get("total_pages", 0),
+    }
+    toon_output, _ = format_search_results_as_toon(memories, pagination=pagination)
+    return _inject_latency(toon_output, _t0)
+
+
+@mcp.tool()
+async def delete_memory(content_hash: str, ctx: Context) -> dict[str, bool | str]:
+    """Permanently delete a specific memory by its unique identifier.
+
+    Removes a memory from the database. This operation is irreversible.
+    The content_hash is returned when storing memories or can be found in
+    search/retrieve results.
+
+    Args:
+        content_hash: Unique identifier returned from store_memory or found in search results
+
+    Returns:
+        Dictionary with:
+        - success: True if deleted, False if not found or error
+        - message: Confirmation or error description
+
+    Use this for: Removing outdated information, cleaning up test data, deleting
+    sensitive content, managing storage space.
+
+    Warning: Deletion is permanent. Verify the content_hash before deleting.
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = DeleteMemoryParams(content_hash=content_hash)
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.delete_memory(params.content_hash)
+    return _inject_latency(result, _t0)
+
+
+@mcp.tool()
+async def check_database_health(ctx: Context) -> dict[str, Any]:
+    """Check memory database health and get storage statistics.
+
+    Verifies database connectivity and returns operational metrics including
+    total memory count, storage backend type, and system status.
+
+    Returns:
+        Dictionary with:
+        - status: "healthy" or error state
+        - backend: Storage backend in use (qdrant)
+        - total_memories: Total count of stored memories
+        - storage_info: Backend-specific statistics
+        - version: Service version
+
+    Use this for: Debugging connection issues, monitoring storage usage,
+    verifying service status, troubleshooting performance problems.
+    """
+    _t0 = time.perf_counter()
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.check_database_health()
+    return _inject_latency(result, _t0)
+
+
+# =============================================================================
+# KNOWLEDGE GRAPH RELATIONSHIP OPERATIONS
+# =============================================================================
+
+
+@mcp.tool()
+async def relation(
+    action: str,
+    content_hash: str,
+    ctx: Context,
+    target_hash: str | None = None,
+    relation_type: str | None = None,
+) -> dict[str, Any]:
+    """Manage typed relationships between memories in the knowledge graph.
+
+    Args:
+        action: Operation to perform:
+            - "create": Create an edge (requires target_hash and relation_type)
+            - "get": List edges for a memory (optional relation_type filter)
+            - "delete": Remove an edge (requires target_hash and relation_type)
+        content_hash: Content hash of the primary/source memory
+        target_hash: Content hash of the related memory (required for create/delete)
+        relation_type: Edge type — "RELATES_TO", "PRECEDES", or "CONTRADICTS"
+            Required for create/delete. Optional filter for get.
+
+    Returns:
+        create: {success, source, target, relation_type}
+        get: {relations: [...], content_hash, count}
+        delete: {success, source, target, relation_type}
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = RelationParams(
+            action=action,
+            content_hash=content_hash,
+            target_hash=target_hash,
+            relation_type=relation_type,
+        )
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+
+    if params.action == "create":
+        result = await memory_service.create_relation(
+            source_hash=params.content_hash,
+            target_hash=params.target_hash,
+            relation_type=params.relation_type,
+        )
+    elif params.action == "get":
+        result = await memory_service.get_relations(
+            content_hash=params.content_hash,
+            relation_type=params.relation_type,
+        )
+    else:  # delete
+        result = await memory_service.delete_relation(
+            source_hash=params.content_hash,
+            target_hash=params.target_hash,
+            relation_type=params.relation_type,
+        )
+
+    return _inject_latency(result, _t0)
+
+
+# =============================================================================
+# CONTRADICTION RESOLUTION TOOLS
+# =============================================================================
+
+
+@mcp.tool()
+async def memory_supersede(
+    old_id: str,
+    new_id: str,
+    ctx: Context,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Mark one memory as superseded by another, resolving a contradiction.
+
+    The old memory is NOT deleted — it is marked as superseded in its metadata
+    and excluded from default search results. A SUPERSEDES graph edge is created
+    from the new memory to the old for audit trail purposes.
+
+    Use this when you have confirmed that new_id contains more accurate or current
+    information than old_id, and you want to declare new_id the authoritative version.
+
+    Args:
+        old_id: Content hash of the memory being superseded (the outdated one)
+        new_id: Content hash of the newer memory that replaces it
+        reason: Human-readable explanation for why old_id is superseded
+
+    Returns:
+        {success, superseded, superseded_by, reason} on success, or {success, error} on failure.
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = SupersedeParams(old_id=old_id, new_id=new_id, reason=reason)
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.supersede_memory(
+        old_hash=params.old_id,
+        new_hash=params.new_id,
+        reason=params.reason,
+    )
+    return _inject_latency(result, _t0)
+
+
+@mcp.tool()
+async def memory_contradictions(
+    ctx: Context,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List unresolved contradiction pairs for review and resolution.
+
+    Returns pairs of memories connected by CONTRADICTS edges, with content
+    previews to help decide which (if either) to supersede. Call memory_supersede
+    to resolve a contradiction once you've determined the authoritative version.
+
+    Args:
+        limit: Maximum number of contradiction pairs to return (default: 20)
+
+    Returns:
+        {success, pairs: [{memory_a_hash, memory_b_hash, confidence, memory_a_content,
+         memory_b_content, memory_a_superseded, memory_b_superseded}], total}
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = ContradictionsParams(limit=limit)
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.get_contradictions_dashboard(limit=params.limit)
+    return _inject_latency(result, _t0)
+
+
+@mcp.tool()
+async def find_duplicates(
+    ctx: Context,
+    similarity_threshold: float = 0.95,
+    limit: int = 500,
+    strategy: str = "keep_newest",
+) -> dict[str, Any]:
+    """Scan memories for near-duplicates using embedding cosine similarity.
+
+    Loads up to *limit* memories, embeds them in a single batch pass, then
+    clusters semantically similar pairs into duplicate groups. Each group
+    includes a recommended canonical memory based on the chosen strategy.
+
+    Call merge_duplicates to supersede the non-canonical memories once you
+    have reviewed the groups.
+
+    Args:
+        similarity_threshold: Cosine similarity threshold (default 0.95).
+            Memories above this are considered duplicates. Lower values
+            (e.g. 0.90) find more aggressive duplicates; higher values
+            (e.g. 0.99) find only near-exact restatements.
+        limit: Maximum number of memories to scan (default 500).
+            Larger values are more thorough but slower.
+        strategy: Canonical selection — which memory to keep:
+            "keep_newest" (default), "keep_oldest", "keep_most_accessed"
+
+    Returns:
+        {success, groups: [{hashes, canonical_hash, max_similarity, size}],
+         total_memories_scanned, total_duplicates_found}
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = FindDuplicatesParams(
+            similarity_threshold=similarity_threshold,
+            limit=limit,
+            strategy=strategy,
+        )
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.find_duplicates(
+        similarity_threshold=params.similarity_threshold,
+        limit=params.limit,
+        strategy=params.strategy,
+    )
+    return _inject_latency(result, _t0)
+
+
+@mcp.tool()
+async def merge_duplicates(
+    canonical_hash: str,
+    duplicate_hashes: list[str],
+    ctx: Context,
+    reason: str = "Merged by deduplication",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Supersede duplicate memories in favour of a canonical one.
+
+    Each memory in *duplicate_hashes* is marked as superseded by
+    *canonical_hash* and excluded from future search results. The duplicates
+    are NOT deleted — they remain for historical audit via the graph layer.
+
+    Typical workflow:
+        1. Call find_duplicates to identify groups
+        2. Review the groups and confirm the canonical_hash
+        3. Call merge_duplicates with the group's hashes
+        4. Optionally set dry_run=True first to preview without modifying storage
+
+    Args:
+        canonical_hash: Content hash of the memory to keep
+        duplicate_hashes: Content hashes of the memories to supersede
+        reason: Human-readable reason stored in each supersession record
+        dry_run: If True, validate inputs and preview result without modifying storage
+
+    Returns:
+        {success, canonical_hash, superseded: [hashes], errors: [], dry_run}
+    """
+    _t0 = time.perf_counter()
+
+    try:
+        params = MergeDuplicatesParams(
+            canonical_hash=canonical_hash,
+            duplicate_hashes=duplicate_hashes,
+            reason=reason,
+            dry_run=dry_run,
+        )
+    except ValidationError as e:
+        return _inject_latency({"success": False, "error": str(e)}, _t0)
+
+    memory_service = ctx.request_context.lifespan_context.memory_service
+    result = await memory_service.merge_duplicate_group(
+        canonical_hash=params.canonical_hash,
+        duplicate_hashes=params.duplicate_hashes,
+        reason=params.reason,
+        dry_run=params.dry_run,
+    )
+    return _inject_latency(result, _t0)
+
+
+# =============================================================================
+# THREE-TIER MEMORY (server-side automation, not exposed as tools by default)
+# =============================================================================
+
+
+def _register_three_tier_tools(mcp_instance: FastMCP) -> None:
+    """Conditionally register three-tier memory tools behind feature flag."""
+
+    @mcp_instance.tool()
+    async def push_to_sensory_buffer(
+        content: str,
+        ctx: Context,
+        tags: str | list[str] | None = None,
+        memory_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Push raw input to the sensory buffer (~7 items, 1s TTL ring buffer)."""
+        memory_service = ctx.request_context.lifespan_context.memory_service
+        three_tier = memory_service.three_tier
+        if three_tier is None:
+            return {"success": False, "error": "Three-tier memory is disabled"}
+        tag_list = normalize_tags(tags)
+        three_tier.push_sensory(content, metadata=metadata, tags=tag_list, memory_type=memory_type)
+        return {"success": True, "message": "Item pushed to sensory buffer", "buffer": three_tier.sensory.stats()}
+
+    @mcp_instance.tool()
+    async def activate_working_memory(
+        key: str,
+        content: str,
+        ctx: Context,
+        tags: str | list[str] | None = None,
+        memory_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Bring a memory into active working memory (~4 chunks, Cowan's limit)."""
+        memory_service = ctx.request_context.lifespan_context.memory_service
+        three_tier = memory_service.three_tier
+        if three_tier is None:
+            return {"success": False, "error": "Three-tier memory is disabled"}
+        tag_list = normalize_tags(tags)
+        chunk = three_tier.attend(key=key, content=content, metadata=metadata, tags=tag_list, memory_type=memory_type)
+        return {"success": True, "key": key, "access_count": chunk.access_count, "working_memory": three_tier.working.stats()}
+
+    @mcp_instance.tool()
+    async def flush_sensory_to_working(ctx: Context) -> dict[str, Any]:
+        """Promote valid sensory buffer items to working memory."""
+        memory_service = ctx.request_context.lifespan_context.memory_service
+        three_tier = memory_service.three_tier
+        if three_tier is None:
+            return {"success": False, "error": "Three-tier memory is disabled"}
+        activated = three_tier.flush_sensory_to_working()
+        return {
+            "success": True,
+            "items_promoted": len(activated),
+            "promoted_keys": [key[:12] + "..." for key, _ in activated],
+            "tiers": three_tier.stats(),
+        }
+
+    @mcp_instance.tool()
+    async def consolidate_working_memory(ctx: Context) -> dict[str, Any]:
+        """Consolidate working memory items accessed 2+ times to long-term storage."""
+        memory_service = ctx.request_context.lifespan_context.memory_service
+        three_tier = memory_service.three_tier
+        if three_tier is None:
+            return {"success": False, "error": "Three-tier memory is disabled"}
+        results = await three_tier.consolidate()
+        return {
+            "success": True,
+            "items_consolidated": len(results),
+            "results": results,
+            "working_memory": three_tier.working.stats(),
+        }
+
+    @mcp_instance.tool()
+    async def get_working_memory_status(ctx: Context) -> dict[str, Any]:
+        """Get sensory buffer and working memory tier statistics."""
+        memory_service = ctx.request_context.lifespan_context.memory_service
+        three_tier = memory_service.three_tier
+        if three_tier is None:
+            return {"enabled": False, "message": "Three-tier memory is disabled"}
+        return {"enabled": True, "tiers": three_tier.stats()}
+
+
+_three_tier_registered = False
+_three_tier_lock = threading.Lock()
+
+
+def _maybe_register_three_tier_tools() -> None:
+    """Register three-tier tools if expose_tools is enabled (once only)."""
+    global _three_tier_registered
+    if _three_tier_registered:
+        return
+    with _three_tier_lock:
+        if _three_tier_registered:
+            return
+        from .config import settings as _settings
+
+        if _settings.three_tier.expose_tools:
+            _register_three_tier_tools(mcp)
+        _three_tier_registered = True
 
 
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
+
 def main():
     """Main entry point for the FastAPI MCP server."""
-    # Configure for Claude Code integration
     port = int(os.getenv("MCP_SERVER_PORT", "8000"))
     host = os.getenv("MCP_SERVER_HOST", "0.0.0.0")
-    
+
     logger.info(f"Starting MCP Memory Service FastAPI server on {host}:{port}")
-    logger.info(f"Storage backend: {STORAGE_BACKEND}")
-    
-    # Run server with streamable HTTP transport
-    mcp.run("streamable-http")
+    logger.info("Storage backend: Qdrant")
+
+    transport_mode = os.getenv("MCP_TRANSPORT_MODE", "http")
+
+    if transport_mode == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport="http", host=host, port=port, stateless_http=True)
+
 
 if __name__ == "__main__":
     main()

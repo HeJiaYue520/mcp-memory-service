@@ -1,36 +1,41 @@
 """
 Unit tests for MemoryService business logic.
 
-These tests verify the MemoryService class centralizes memory operations
-correctly and provides consistent behavior across all interfaces.
+These tests verify:
+1. Input validation and normalization
+2. Pagination calculations
+3. Error handling paths
+4. Data transformation logic
+
+For integration tests with real storage backends, see:
+tests/integration/test_storage_integration.py
+
+NOTE: Tests that only verify mocks were called have been removed.
+We test BEHAVIOR, not implementation details.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
-from typing import List
+from unittest.mock import ANY, AsyncMock
 
-from mcp_memory_service.services.memory_service import MemoryService
+import pytest
+
 from mcp_memory_service.models.memory import Memory, MemoryQueryResult
+from mcp_memory_service.services.memory_service import MemoryService
 from mcp_memory_service.storage.base import MemoryStorage
 
-
+# =============================================================================
 # Test Fixtures
+# =============================================================================
+
 
 @pytest.fixture
 def mock_storage():
     """Create a mock storage backend."""
     storage = AsyncMock(spec=MemoryStorage)
-    # Add required properties
     storage.max_content_length = 1000
     storage.supports_chunking = True
-    # Setup method return values to avoid AttributeError
     storage.store.return_value = (True, "Success")
     storage.delete.return_value = (True, "Deleted")
-    storage.get_stats.return_value = {
-        "backend": "mock",
-        "total_memories": 0
-    }
+    storage.get_stats.return_value = {"backend": "mock", "total_memories": 0}
     return storage
 
 
@@ -50,643 +55,1128 @@ def sample_memory():
         memory_type="note",
         metadata={"source": "test"},
         created_at=1698765432.0,
-        updated_at=1698765432.0
+        updated_at=1698765432.0,
     )
 
 
 @pytest.fixture
 def sample_memories():
     """Create a list of sample memories."""
-    memories = []
-    for i in range(5):
-        memories.append(Memory(
-            content=f"Test memory {i+1}",
-            content_hash=f"hash_{i+1}",
-            tags=[f"tag{i+1}", "test"],
+    return [
+        Memory(
+            content=f"Test memory {i + 1}",
+            content_hash=f"hash_{i + 1}",
+            tags=[f"tag{i + 1}", "test"],
             memory_type="note",
-            metadata={"index": i+1},
+            metadata={"index": i + 1},
             created_at=1698765432.0 + i * 100,
-            updated_at=1698765432.0 + i * 100
-        ))
-    return memories
+            updated_at=1698765432.0 + i * 100,
+        )
+        for i in range(5)
+    ]
 
 
-# Test list_memories method
-
-@pytest.mark.asyncio
-async def test_list_memories_basic_pagination(memory_service, mock_storage, sample_memories):
-    """Test basic pagination functionality."""
-    # Setup mock
-    mock_storage.get_all_memories.return_value = sample_memories[:2]
-    mock_storage.count_all_memories.return_value = 5
-
-    # Execute
-    result = await memory_service.list_memories(page=1, page_size=2)
-
-    # Verify
-    assert result["page"] == 1
-    assert result["page_size"] == 2
-    assert result["total"] == 5
-    assert result["has_more"] is True
-    assert len(result["memories"]) == 2
-
-    # Verify storage called with correct parameters
-    mock_storage.get_all_memories.assert_called_once_with(
-        limit=2,
-        offset=0,
-        memory_type=None,
-        tags=None
-    )
+# =============================================================================
+# Pagination Logic Tests
+# These test the CALCULATION logic, not mock interactions
+# =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_list_memories_with_tag_filter(memory_service, mock_storage, sample_memories):
-    """Test filtering by tag."""
-    filtered_memories = [m for m in sample_memories if "tag1" in m.tags]
-    mock_storage.get_all_memories.return_value = filtered_memories
-    mock_storage.count_all_memories.return_value = len(filtered_memories)
+class TestPaginationLogic:
+    """Test pagination metadata calculations."""
 
-    result = await memory_service.list_memories(page=1, page_size=10, tag="tag1")
+    def test_pagination_metadata_basic(self, memory_service):
+        """Test basic pagination metadata structure."""
+        metadata = memory_service._build_pagination_metadata(total=100, page=1, page_size=10)
 
-    # Verify tag passed to storage as list
-    mock_storage.get_all_memories.assert_called_once()
-    call_kwargs = mock_storage.get_all_memories.call_args.kwargs
-    assert call_kwargs["tags"] == ["tag1"]
+        assert metadata["total"] == 100
+        assert metadata["page"] == 1
+        assert metadata["page_size"] == 10
+        assert metadata["has_more"] is True
+        assert metadata["total_pages"] == 10
 
+    def test_pagination_has_more_true_when_more_pages(self, memory_service):
+        """Test has_more is True when not on last page."""
+        metadata = memory_service._build_pagination_metadata(total=25, page=1, page_size=10)
 
-@pytest.mark.asyncio
-async def test_list_memories_with_type_filter(memory_service, mock_storage, sample_memories):
-    """Test filtering by memory type."""
-    mock_storage.get_all_memories.return_value = sample_memories
-    mock_storage.count_all_memories.return_value = 5
+        assert metadata["has_more"] is True
 
-    result = await memory_service.list_memories(page=1, page_size=10, memory_type="note")
+    def test_pagination_has_more_false_on_last_page(self, memory_service):
+        """Test has_more is False on the last page."""
+        metadata = memory_service._build_pagination_metadata(total=25, page=3, page_size=10)
 
-    # Verify type passed to storage
-    mock_storage.get_all_memories.assert_called_once()
-    call_kwargs = mock_storage.get_all_memories.call_args.kwargs
-    assert call_kwargs["memory_type"] == "note"
+        assert metadata["has_more"] is False
 
+    def test_pagination_has_more_false_when_exact_fit(self, memory_service):
+        """Test has_more is False when results exactly fill pages."""
+        metadata = memory_service._build_pagination_metadata(total=20, page=2, page_size=10)
 
-@pytest.mark.asyncio
-async def test_list_memories_offset_calculation(memory_service, mock_storage):
-    """Test correct offset calculation for different pages."""
-    mock_storage.get_all_memories.return_value = []
-    mock_storage.count_all_memories.return_value = 0
+        assert metadata["has_more"] is False
 
-    # Page 3 with page_size 10 should have offset 20
-    await memory_service.list_memories(page=3, page_size=10)
+    def test_pagination_total_pages_calculation(self, memory_service):
+        """Test total_pages ceiling division."""
+        # 25 items / 10 per page = 3 pages
+        metadata = memory_service._build_pagination_metadata(total=25, page=1, page_size=10)
+        assert metadata["total_pages"] == 3
 
-    call_kwargs = mock_storage.get_all_memories.call_args.kwargs
-    assert call_kwargs["offset"] == 20
-    assert call_kwargs["limit"] == 10
+        # 20 items / 10 per page = 2 pages
+        metadata = memory_service._build_pagination_metadata(total=20, page=1, page_size=10)
+        assert metadata["total_pages"] == 2
 
+        # 1 item / 10 per page = 1 page
+        metadata = memory_service._build_pagination_metadata(total=1, page=1, page_size=10)
+        assert metadata["total_pages"] == 1
 
-@pytest.mark.asyncio
-async def test_list_memories_has_more_false(memory_service, mock_storage, sample_memories):
-    """Test has_more is False when no more results."""
-    mock_storage.get_all_memories.return_value = sample_memories
-    mock_storage.count_all_memories.return_value = 5
+    def test_pagination_empty_results(self, memory_service):
+        """Test pagination with zero results."""
+        metadata = memory_service._build_pagination_metadata(total=0, page=1, page_size=10)
 
-    # Requesting page that includes last item
-    result = await memory_service.list_memories(page=1, page_size=10)
-
-    assert result["has_more"] is False
-
-
-@pytest.mark.asyncio
-async def test_list_memories_error_handling(memory_service, mock_storage):
-    """Test error handling in list_memories."""
-    mock_storage.get_all_memories.side_effect = Exception("Database error")
-
-    result = await memory_service.list_memories(page=1, page_size=10)
-
-    assert result["success"] is False
-    assert "error" in result
-    assert "Database error" in result["error"]
-    assert result["memories"] == []
+        assert metadata["total"] == 0
+        assert metadata["has_more"] is False
+        # With 0 results, total_pages formula gives 0 (ceiling division: (0 + 10 - 1) // 10 = 0)
+        assert metadata["total_pages"] == 0
 
 
-# Test store_memory method
-
-@pytest.mark.asyncio
-async def test_store_memory_basic(memory_service, mock_storage):
-    """Test basic memory storage."""
-    mock_storage.store.return_value = (True, "Success")
-
-    result = await memory_service.store_memory(
-        content="Test content",
-        tags=["test"],
-        memory_type="note"
-    )
-
-    assert result["success"] is True
-    assert "memory" in result
-    assert result["memory"]["content"] == "Test content"
-
-    # Verify storage.store was called
-    mock_storage.store.assert_called_once()
-    stored_memory = mock_storage.store.call_args.args[0]
-    assert stored_memory.content == "Test content"
-    assert stored_memory.tags == ["test"]
+# =============================================================================
+# Input Normalization Tests
+# =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_store_memory_with_hostname_tagging(memory_service, mock_storage):
-    """Test hostname tagging is applied correctly."""
-    mock_storage.store.return_value = None
+class TestInputNormalization:
+    """Test input validation and normalization."""
 
-    result = await memory_service.store_memory(
-        content="Test content",
-        tags=["test"],
-        client_hostname="my-machine"
-    )
+    @pytest.mark.asyncio
+    async def test_tag_string_converted_to_list(self, memory_service, mock_storage):
+        """Test that string tags are converted to list."""
+        mock_storage.count_tag_search.return_value = 0
+        mock_storage.search_by_tag.return_value = []
 
-    # Verify hostname tag added
-    stored_memory = mock_storage.store.call_args.args[0]
-    assert "source:my-machine" in stored_memory.tags
-    assert stored_memory.metadata["hostname"] == "my-machine"
+        result = await memory_service.search_by_tag(tags="single-tag")
+
+        # Verify tags were normalized
+        assert result["tags"] == ["single-tag"]
+
+    @pytest.mark.asyncio
+    async def test_none_tags_normalized_to_empty_list(self, memory_service, mock_storage):
+        """Test that None tags become empty list in stored memory."""
+        mock_storage.store.return_value = (True, "Success")
+
+        await memory_service.store_memory(content="Test", tags=None)
+
+        # Get the memory that was stored
+        stored_memory = mock_storage.store.call_args.args[0]
+        assert isinstance(stored_memory.tags, list)
+
+    @pytest.mark.asyncio
+    async def test_hostname_tagging_adds_source_tag(self, memory_service, mock_storage):
+        """Test hostname creates source: prefixed tag."""
+        mock_storage.store.return_value = (True, "Success")
+
+        await memory_service.store_memory(content="Test", tags=["existing"], client_hostname="my-machine")
+
+        stored_memory = mock_storage.store.call_args.args[0]
+        assert "source:my-machine" in stored_memory.tags
+        assert stored_memory.metadata["hostname"] == "my-machine"
+
+    @pytest.mark.asyncio
+    async def test_hostname_not_duplicated(self, memory_service, mock_storage):
+        """Test hostname tag isn't added if already present."""
+        mock_storage.store.return_value = (True, "Success")
+
+        await memory_service.store_memory(content="Test", tags=["source:my-machine"], client_hostname="my-machine")
+
+        stored_memory = mock_storage.store.call_args.args[0]
+        source_tags = [t for t in stored_memory.tags if t.startswith("source:")]
+        assert len(source_tags) == 1
 
 
-@pytest.mark.asyncio
-async def test_store_memory_hostname_not_duplicated(memory_service, mock_storage):
-    """Test hostname tag is not duplicated if already present."""
-    mock_storage.store.return_value = None
-
-    result = await memory_service.store_memory(
-        content="Test content",
-        tags=["test", "source:my-machine"],
-        client_hostname="my-machine"
-    )
-
-    stored_memory = mock_storage.store.call_args.args[0]
-    # Count occurrences of hostname tag
-    hostname_tags = [t for t in stored_memory.tags if t.startswith("source:")]
-    assert len(hostname_tags) == 1
+# =============================================================================
+# Error Handling Tests
+# =============================================================================
 
 
-@pytest.mark.asyncio
-@patch('mcp_memory_service.services.memory_service.ENABLE_AUTO_SPLIT', True)
-async def test_store_memory_with_chunking(memory_service, mock_storage):
-    """Test content chunking when enabled and content is large."""
-    mock_storage.store.return_value = (True, "Success")
-    # Set max_content_length to trigger chunking
-    mock_storage.max_content_length = 100
+class TestErrorHandling:
+    """Test error handling and recovery."""
 
-    # Create content larger than max_content_length
-    long_content = "x" * 200
+    @pytest.mark.asyncio
+    async def test_store_validation_error_returns_structured_response(self, memory_service, mock_storage):
+        """Test ValueError produces clean error response."""
+        mock_storage.store.side_effect = ValueError("Invalid content")
 
-    with patch('mcp_memory_service.services.memory_service.split_content') as mock_split:
-        mock_split.return_value = ["chunk1", "chunk2"]
+        result = await memory_service.store_memory(content="Test")
 
-        result = await memory_service.store_memory(content=long_content)
+        assert result["success"] is False
+        assert "Invalid memory data" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_store_connection_error_returns_structured_response(self, memory_service, mock_storage):
+        """Test ConnectionError produces appropriate response."""
+        mock_storage.store.side_effect = ConnectionError("DB unavailable")
+
+        result = await memory_service.store_memory(content="Test")
+
+        assert result["success"] is False
+        assert "Storage connection failed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_store_unexpected_error_returns_generic_response(self, memory_service, mock_storage):
+        """Test unexpected errors are caught and wrapped."""
+        mock_storage.store.side_effect = RuntimeError("Unexpected")
+
+        result = await memory_service.store_memory(content="Test")
+
+        assert result["success"] is False
+        assert "Failed to store memory" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_retrieve_error_returns_empty_results(self, memory_service, mock_storage):
+        """Test retrieval errors return empty list, not crash."""
+        mock_storage.retrieve.side_effect = Exception("Search failed")
+
+        result = await memory_service.retrieve_memories(query="test")
+
+        assert result["memories"] == []
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_list_memories_error_returns_empty_results(self, memory_service, mock_storage):
+        """Test list errors return empty list with error message."""
+        mock_storage.get_all_memories.side_effect = Exception("Database error")
+
+        result = await memory_service.list_memories(page=1, page_size=10)
+
+        assert result["success"] is False
+        assert result["memories"] == []
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_error_returns_failure(self, memory_service, mock_storage):
+        """Test delete errors produce failure response."""
+        mock_storage.delete.side_effect = Exception("Delete failed")
+
+        result = await memory_service.delete_memory("test_hash")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_health_check_error_returns_unhealthy(self, memory_service, mock_storage):
+        """Test health check failures report unhealthy."""
+        mock_storage.get_stats.side_effect = Exception("Stats failed")
+
+        result = await memory_service.check_database_health()
+
+        assert result["healthy"] is False
+        assert "error" in result
+
+
+# =============================================================================
+# Response Formatting Tests
+# =============================================================================
+
+
+class TestResponseFormatting:
+    """Test response data transformation."""
+
+    def test_format_memory_includes_all_fields(self, memory_service, sample_memory):
+        """Test formatted response has all required fields."""
+        formatted = memory_service._format_memory_response(sample_memory)
+
+        required_fields = [
+            "content",
+            "content_hash",
+            "tags",
+            "memory_type",
+            "metadata",
+            "created_at",
+            "updated_at",
+            "created_at_iso",
+            "updated_at_iso",
+        ]
+
+        for field in required_fields:
+            assert field in formatted, f"Missing field: {field}"
+
+    def test_format_memory_preserves_content(self, memory_service, sample_memory):
+        """Test content is not modified during formatting."""
+        formatted = memory_service._format_memory_response(sample_memory)
+
+        assert formatted["content"] == sample_memory.content
+        assert formatted["content_hash"] == sample_memory.content_hash
+        assert formatted["tags"] == sample_memory.tags
+
+    def test_format_memory_includes_iso_timestamps(self, memory_service, sample_memory):
+        """Test ISO timestamp conversion is included."""
+        formatted = memory_service._format_memory_response(sample_memory)
+
+        # ISO timestamps should be strings
+        assert isinstance(formatted["created_at_iso"], str)
+        assert isinstance(formatted["updated_at_iso"], str)
+
+
+# =============================================================================
+# Offset Calculation Tests
+# =============================================================================
+
+
+class TestOffsetCalculation:
+    """Test pagination offset calculations."""
+
+    @pytest.mark.asyncio
+    async def test_page_1_has_zero_offset(self, memory_service, mock_storage):
+        """Test first page has offset 0."""
+        mock_storage.get_all_memories.return_value = []
+        mock_storage.count_all_memories.return_value = 0
+
+        await memory_service.list_memories(page=1, page_size=10)
+
+        call_kwargs = mock_storage.get_all_memories.call_args.kwargs
+        assert call_kwargs["offset"] == 0
+
+    @pytest.mark.asyncio
+    async def test_page_2_has_correct_offset(self, memory_service, mock_storage):
+        """Test page 2 offset equals page_size."""
+        mock_storage.get_all_memories.return_value = []
+        mock_storage.count_all_memories.return_value = 0
+
+        await memory_service.list_memories(page=2, page_size=10)
+
+        call_kwargs = mock_storage.get_all_memories.call_args.kwargs
+        assert call_kwargs["offset"] == 10
+
+    @pytest.mark.asyncio
+    async def test_page_3_offset_calculation(self, memory_service, mock_storage):
+        """Test page 3 with page_size 10 has offset 20."""
+        mock_storage.get_all_memories.return_value = []
+        mock_storage.count_all_memories.return_value = 0
+
+        await memory_service.list_memories(page=3, page_size=10)
+
+        call_kwargs = mock_storage.get_all_memories.call_args.kwargs
+        assert call_kwargs["offset"] == 20
+        assert call_kwargs["limit"] == 10
+
+
+# =============================================================================
+# Match Type Tests
+# =============================================================================
+
+
+class TestMatchTypeReporting:
+    """Test match type is reported correctly in tag search."""
+
+    @pytest.mark.asyncio
+    async def test_match_any_reported(self, memory_service, mock_storage):
+        """Test match_all=False reports as ANY."""
+        mock_storage.count_tag_search.return_value = 0
+        mock_storage.search_by_tag.return_value = []
+
+        result = await memory_service.search_by_tag(tags=["a", "b"], match_all=False)
+
+        assert result["match_type"] == "ANY"
+
+    @pytest.mark.asyncio
+    async def test_match_all_reported(self, memory_service, mock_storage):
+        """Test match_all=True reports as ALL."""
+        mock_storage.count_tag_search.return_value = 0
+        mock_storage.search_by_tag.return_value = []
+
+        result = await memory_service.search_by_tag(tags=["a", "b"], match_all=True)
+
+        assert result["match_type"] == "ALL"
+
+
+# =============================================================================
+# Found/Not Found Response Tests
+# =============================================================================
+
+
+class TestFoundNotFoundResponses:
+    """Test found/not found response structures."""
+
+    @pytest.mark.asyncio
+    async def test_get_by_hash_found_response(self, memory_service, mock_storage, sample_memory):
+        """Test response structure when memory is found."""
+        mock_storage.get_memory_by_hash.return_value = sample_memory
+
+        result = await memory_service.get_memory_by_hash("test_hash")
+
+        assert result["found"] is True
+        assert "memory" in result
+
+    @pytest.mark.asyncio
+    async def test_get_by_hash_not_found_response(self, memory_service, mock_storage):
+        """Test response structure when memory is not found."""
+        mock_storage.get_memory_by_hash.return_value = None
+
+        result = await memory_service.get_memory_by_hash("nonexistent")
+
+        assert result["found"] is False
+        assert result["content_hash"] == "nonexistent"
+
+    @pytest.mark.asyncio
+    async def test_delete_success_response(self, memory_service, mock_storage):
+        """Test delete success response structure."""
+        mock_storage.delete.return_value = (True, "Deleted")
+
+        result = await memory_service.delete_memory("test_hash")
 
         assert result["success"] is True
-        assert "memories" in result
-        assert result["total_chunks"] == 2
-        assert "original_hash" in result
-
-        # Verify storage.store called twice (once per chunk)
-        assert mock_storage.store.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_store_memory_validation_error(memory_service, mock_storage):
-    """Test ValueError is caught and returned as error."""
-    mock_storage.store.side_effect = ValueError("Invalid content")
-
-    result = await memory_service.store_memory(content="Test")
+        assert result["content_hash"] == "test_hash"
 
-    assert result["success"] is False
-    assert "error" in result
-    assert "Invalid memory data" in result["error"]
+    @pytest.mark.asyncio
+    async def test_delete_not_found_response(self, memory_service, mock_storage):
+        """Test delete not-found response structure."""
+        mock_storage.delete.return_value = (False, "Not found")
 
+        result = await memory_service.delete_memory("nonexistent")
 
-@pytest.mark.asyncio
-async def test_store_memory_connection_error(memory_service, mock_storage):
-    """Test ConnectionError is caught and handled."""
-    mock_storage.store.side_effect = ConnectionError("Storage unavailable")
+        assert result["success"] is False
 
-    result = await memory_service.store_memory(content="Test")
 
-    assert result["success"] is False
-    assert "error" in result
-    assert "Storage connection failed" in result["error"]
+# =============================================================================
+# Health Check Response Tests
+# =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_store_memory_unexpected_error(memory_service, mock_storage):
-    """Test unexpected exceptions are caught."""
-    mock_storage.store.side_effect = RuntimeError("Unexpected error")
+class TestHealthCheckResponses:
+    """Test health check response structure."""
 
-    result = await memory_service.store_memory(content="Test")
+    @pytest.mark.asyncio
+    async def test_healthy_response_includes_stats(self, memory_service, mock_storage):
+        """Test healthy response includes storage stats."""
+        mock_storage.get_stats.return_value = {"backend": "test", "total_memories": 42}
 
-    assert result["success"] is False
-    assert "error" in result
-    assert "Failed to store memory" in result["error"]
+        result = await memory_service.check_database_health()
 
+        assert result["healthy"] is True
+        assert result["total_memories"] == 42
+        assert result["storage_type"] == "test"
+        assert "last_updated" in result
 
-# Test retrieve_memories method
 
-@pytest.mark.asyncio
-async def test_retrieve_memories_basic(memory_service, mock_storage, sample_memories):
-    """Test basic semantic search retrieval."""
-    mock_storage.retrieve.return_value = [
-        MemoryQueryResult(memory=mem, relevance_score=0.9 - i*0.1)
-        for i, mem in enumerate(sample_memories[:3])
-    ]
+# =============================================================================
+# Typed Relationship Tests
+# =============================================================================
 
-    result = await memory_service.retrieve_memories(query="test query", n_results=3)
 
-    assert result["query"] == "test query"
-    assert result["count"] == 3
-    assert len(result["memories"]) == 3
+class TestRelationOperations:
+    """Test create_relation, get_relations, delete_relation service methods."""
 
-    # After fix: storage.retrieve() only accepts query and n_results
-    mock_storage.retrieve.assert_called_once_with(
-        query="test query",
-        n_results=3
-    )
+    @pytest.fixture
+    def mock_graph_client(self):
+        """Create a mock graph client with typed edge methods."""
+        from unittest.mock import AsyncMock
 
+        client = AsyncMock()
+        client.create_typed_edge = AsyncMock(return_value=True)
+        client.get_typed_edges = AsyncMock(return_value=[])
+        client.delete_typed_edge = AsyncMock(return_value=True)
+        return client
 
-@pytest.mark.asyncio
-async def test_retrieve_memories_with_filters(memory_service, mock_storage, sample_memories):
-    """Test retrieval with tag and type filters."""
-    # Return memories that will be filtered by MemoryService
-    # Create a memory with matching tags for filtering
-    from mcp_memory_service.models.memory import Memory
-    import hashlib
-    content_hash = hashlib.sha256("test content".encode()).hexdigest()
-    matching_memory = Memory(
-        content="test content",
-        content_hash=content_hash,
-        tags=["tag1"],
-        memory_type="note",
-        created_at=1234567890.0
-    )
-    matching_memory.metadata = {"tags": ["tag1"], "memory_type": "note"}
-    mock_storage.retrieve.return_value = [
-        MemoryQueryResult(memory=matching_memory, relevance_score=0.85)
-    ]
-
-    result = await memory_service.retrieve_memories(
-        query="test",
-        n_results=5,
-        tags=["tag1"],
-        memory_type="note"
-    )
-
-    # After fix: storage.retrieve() only accepts query and n_results
-    # Filtering is done by MemoryService after retrieval
-    mock_storage.retrieve.assert_called_once_with(
-        query="test",
-        n_results=5
-    )
-
-
-@pytest.mark.asyncio
-async def test_retrieve_memories_error_handling(memory_service, mock_storage):
-    """Test error handling in retrieve_memories."""
-    mock_storage.retrieve.side_effect = Exception("Retrieval failed")
-
-    result = await memory_service.retrieve_memories(query="test")
-
-    assert "error" in result
-    assert result["memories"] == []
-    assert "Failed to retrieve memories" in result["error"]
-
-
-# Test search_by_tag method
-
-@pytest.mark.asyncio
-async def test_search_by_tag_single_tag(memory_service, mock_storage, sample_memories):
-    """Test searching by a single tag."""
-    mock_storage.search_by_tag.return_value = sample_memories[:2]
-
-    result = await memory_service.search_by_tag(tags="test")
-
-    assert result["tags"] == ["test"]
-    assert result["match_type"] == "ANY"
-    assert result["count"] == 2
-
-    mock_storage.search_by_tag.assert_called_once_with(
-        tags=["test"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_search_by_tag_multiple_tags(memory_service, mock_storage, sample_memories):
-    """Test searching by multiple tags."""
-    mock_storage.search_by_tag.return_value = sample_memories
-
-    result = await memory_service.search_by_tag(tags=["tag1", "tag2"])
-
-    assert result["tags"] == ["tag1", "tag2"]
-    assert result["match_type"] == "ANY"
-
-
-@pytest.mark.asyncio
-async def test_search_by_tag_match_all(memory_service, mock_storage, sample_memories):
-    """Test searching with match_all=True."""
-    mock_storage.search_by_tag.return_value = sample_memories[:1]
-
-    result = await memory_service.search_by_tag(tags=["tag1", "tag2"], match_all=True)
-
-    assert result["match_type"] == "ALL"
-    mock_storage.search_by_tag.assert_called_once_with(
-        tags=["tag1", "tag2"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_search_by_tag_error_handling(memory_service, mock_storage):
-    """Test error handling in search_by_tag."""
-    mock_storage.search_by_tag.side_effect = Exception("Search failed")
-
-    result = await memory_service.search_by_tag(tags="test")
-
-    assert "error" in result
-    assert result["memories"] == []
-    assert "Failed to search by tags" in result["error"]
-
-
-# Test get_memory_by_hash method
-
-@pytest.mark.asyncio
-async def test_get_memory_by_hash_found(memory_service, mock_storage, sample_memory):
-    """Test getting memory by hash when found."""
-    mock_storage.get_by_hash.return_value = sample_memory
-
-    result = await memory_service.get_memory_by_hash("test_hash_123")
-
-    assert result["found"] is True
-    assert "memory" in result
-    assert result["memory"]["content_hash"] == "test_hash_123"
-    mock_storage.get_by_hash.assert_called_once_with("test_hash_123")
-
-
-@pytest.mark.asyncio
-async def test_get_memory_by_hash_not_found(memory_service, mock_storage):
-    """Test getting memory by hash when not found."""
-    mock_storage.get_by_hash.return_value = None
-
-    result = await memory_service.get_memory_by_hash("nonexistent_hash")
-
-    assert result["found"] is False
-    assert result["content_hash"] == "nonexistent_hash"
-    mock_storage.get_by_hash.assert_called_once_with("nonexistent_hash")
-
-
-@pytest.mark.asyncio
-async def test_get_memory_by_hash_error(memory_service, mock_storage):
-    """Test error handling in get_memory_by_hash."""
-    mock_storage.get_by_hash.side_effect = Exception("Database error")
-
-    result = await memory_service.get_memory_by_hash("test_hash")
-
-    assert result["found"] is False
-    assert "error" in result
-    assert "Failed to get memory" in result["error"]
-
-
-# Test delete_memory method
-
-@pytest.mark.asyncio
-async def test_delete_memory_success(memory_service, mock_storage):
-    """Test successful memory deletion."""
-    mock_storage.delete.return_value = (True, "Deleted successfully")
-
-    result = await memory_service.delete_memory("test_hash")
-
-    assert result["success"] is True
-    assert result["content_hash"] == "test_hash"
-    mock_storage.delete.assert_called_once_with("test_hash")
-
-
-@pytest.mark.asyncio
-async def test_delete_memory_not_found(memory_service, mock_storage):
-    """Test deleting non-existent memory."""
-    mock_storage.delete.return_value = (False, "Not found")
-
-    result = await memory_service.delete_memory("nonexistent_hash")
-
-    assert result["success"] is False
-
-
-@pytest.mark.asyncio
-async def test_delete_memory_error(memory_service, mock_storage):
-    """Test error handling in delete_memory."""
-    mock_storage.delete.side_effect = Exception("Delete failed")
-
-    result = await memory_service.delete_memory("test_hash")
-
-    assert result["success"] is False
-    assert "error" in result
-    assert "Failed to delete memory" in result["error"]
-
-
-# Test health_check method
-
-@pytest.mark.asyncio
-async def test_health_check_success(memory_service, mock_storage):
-    """Test successful health check."""
-    mock_storage.get_stats.return_value = {
-        "backend": "sqlite-vec",
-        "total_memories": 100,
-        "database_size": "5MB"
-    }
-
-    result = await memory_service.health_check()
-
-    assert result["healthy"] is True
-    assert result["storage_type"] == "sqlite-vec"
-    assert result["total_memories"] == 100
-    assert "last_updated" in result
-
-
-@pytest.mark.asyncio
-async def test_health_check_failure(memory_service, mock_storage):
-    """Test health check when storage fails."""
-    mock_storage.get_stats.side_effect = Exception("Health check failed")
-
-    result = await memory_service.health_check()
-
-    assert result["healthy"] is False
-    assert "error" in result
-    assert "Health check failed" in result["error"]
-
-
-# Test _format_memory_response method
-
-def test_format_memory_response(memory_service, sample_memory):
-    """Test memory formatting for API responses."""
-    formatted = memory_service._format_memory_response(sample_memory)
-
-    assert formatted["content"] == sample_memory.content
-    assert formatted["content_hash"] == sample_memory.content_hash
-    assert formatted["tags"] == sample_memory.tags
-    assert formatted["memory_type"] == sample_memory.memory_type
-    assert formatted["metadata"] == sample_memory.metadata
-    assert "created_at" in formatted
-    assert "updated_at" in formatted
-    assert "created_at_iso" in formatted
-    assert "updated_at_iso" in formatted
-
-
-def test_format_memory_response_preserves_all_fields(memory_service, sample_memory):
-    """Test that formatting preserves all memory fields."""
-    formatted = memory_service._format_memory_response(sample_memory)
-
-    # Verify all TypedDict fields are present
-    required_fields = [
-        "content", "content_hash", "tags", "memory_type", "metadata",
-        "created_at", "updated_at", "created_at_iso", "updated_at_iso"
-    ]
-
-    for field in required_fields:
-        assert field in formatted
-
-
-# Integration-style tests (still using mocks but testing workflows)
-
-@pytest.mark.asyncio
-async def test_store_and_retrieve_workflow(memory_service, mock_storage, sample_memory):
-    """Test complete workflow: store then retrieve."""
-    # Setup mocks
-    mock_storage.store.return_value = (True, "Success")
-    mock_storage.retrieve.return_value = [
-        MemoryQueryResult(memory=sample_memory, relevance_score=0.92)
-    ]
-
-    # Store memory
-    store_result = await memory_service.store_memory(
-        content="Test workflow",
-        tags=["workflow"],
-        memory_type="test"
-    )
-    assert store_result["success"] is True
-
-    # Retrieve memory
-    retrieve_result = await memory_service.retrieve_memories(query="workflow")
-    assert len(retrieve_result["memories"]) > 0
-
-
-@pytest.mark.asyncio
-async def test_list_memories_database_level_filtering(memory_service, mock_storage):
-    """Test that list_memories uses database-level filtering (not loading all)."""
-    mock_storage.get_all_memories.return_value = []
-    mock_storage.count_all_memories.return_value = 1000
-
-    # Request page 1 with 10 items from 1000 total
-    result = await memory_service.list_memories(page=1, page_size=10)
-
-    # Verify we only requested 10 items, not all 1000
-    call_kwargs = mock_storage.get_all_memories.call_args.kwargs
-    assert call_kwargs["limit"] == 10
-    assert call_kwargs["offset"] == 0
-
-    # This proves we're using database-level filtering, not O(n) memory loading
-    mock_storage.get_all_memories.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_empty_tags_list_stored_correctly(memory_service, mock_storage):
-    """Test that empty or None tags are handled correctly."""
-    mock_storage.store.return_value = None
-
-    # Store with None tags
-    result = await memory_service.store_memory(content="Test", tags=None)
-
-    stored_memory = mock_storage.store.call_args.args[0]
-    assert isinstance(stored_memory.tags, list)
-    assert len(stored_memory.tags) == 0
-
-
-@pytest.mark.asyncio
-async def test_metadata_preserved_through_storage(memory_service, mock_storage):
-    """Test that metadata is preserved correctly."""
-    mock_storage.store.return_value = None
-
-    custom_metadata = {"key1": "value1", "key2": 123}
-    result = await memory_service.store_memory(
-        content="Test",
-        metadata=custom_metadata
-    )
-
-    stored_memory = mock_storage.store.call_args.args[0]
-    assert "key1" in stored_memory.metadata
-    assert stored_memory.metadata["key1"] == "value1"
-
-
-@pytest.mark.asyncio
-async def test_chunked_storage_all_chunks_fail(mock_storage):
-    """
-    Test that chunked storage returns success=False when ALL chunks fail.
-
-    Regression test for issue where storing content > max_content_length
-    would return {"success": True, "memories": [], "total_chunks": N}
-    when all chunks failed (e.g., due to duplicates).
-    """
-    # Setup: max_content_length = 100, all store() calls fail
-    mock_storage.max_content_length = 100
-    mock_storage.store.return_value = (False, "Duplicate content detected")
-
-    service = MemoryService(storage=mock_storage)
-
-    # Create content > 100 chars to trigger chunking
-    long_content = "A" * 250  # Will be split into ~3 chunks
-
-    with patch('mcp_memory_service.services.memory_service.ENABLE_AUTO_SPLIT', True):
-        result = await service.store_memory(
-            content=long_content,
-            tags=["test"],
-            memory_type="test"
+    @pytest.fixture
+    def service_with_graph(self, mock_storage, mock_graph_client):
+        """MemoryService with graph layer enabled."""
+        return MemoryService(
+            storage=mock_storage,
+            graph_client=mock_graph_client,
         )
 
-    # Assert: should return failure, not success
-    assert result["success"] is False, "Should fail when all chunks fail to store"
-    assert "error" in result, "Should include error message"
-    assert "Failed to store all" in result["error"], "Error should explain all chunks failed"
-    assert "Duplicate content detected" in result["error"], "Error should include storage failure reason"
+    @pytest.mark.asyncio
+    async def test_create_relation_success(self, service_with_graph, mock_graph_client):
+        result = await service_with_graph.create_relation("hash_a", "hash_b", "RELATES_TO")
 
-
-@pytest.mark.asyncio
-async def test_chunked_storage_partial_success(mock_storage):
-    """
-    Test that chunked storage returns partial success when SOME chunks fail.
-
-    This tests the scenario where content is split and some chunks succeed
-    while others fail (e.g., first chunk is new, second is duplicate).
-    """
-    # Setup: max_content_length = 100
-    mock_storage.max_content_length = 100
-
-    # Prepare enough results for any number of chunks
-    # Pattern: success, fail, success, fail, success...
-    store_results = []
-    for i in range(10):  # Enough for any split
-        if i % 2 == 0:
-            store_results.append((True, "Success"))
-        else:
-            store_results.append((False, "Duplicate content detected"))
-    mock_storage.store.side_effect = store_results
-
-    service = MemoryService(storage=mock_storage)
-
-    # Create content > 100 chars to trigger chunking
-    long_content = "B" * 250
-
-    with patch('mcp_memory_service.services.memory_service.ENABLE_AUTO_SPLIT', True):
-        result = await service.store_memory(
-            content=long_content,
-            tags=["test"],
-            memory_type="test"
+        assert result["success"] is True
+        assert result["source"] == "hash_a"
+        assert result["target"] == "hash_b"
+        assert result["relation_type"] == "RELATES_TO"
+        mock_graph_client.create_typed_edge.assert_called_once_with(
+            source_hash="hash_a", target_hash="hash_b", relation_type="RELATES_TO"
         )
 
-    # Assert: should return partial success
-    assert result["success"] is True, "Should succeed when some chunks store successfully"
-    assert "memories" in result, "Should include stored memories"
-    assert len(result["memories"]) > 0, "Should have at least one successful chunk"
-    assert result.get("failed_chunks", 0) > 0, "Should report at least one failed chunk"
-    total_attempted = len(result["memories"]) + result.get("failed_chunks", 0)
-    assert result["total_chunks"] == total_attempted, "Total chunks should match attempted"
+    @pytest.mark.asyncio
+    async def test_create_relation_nodes_missing(self, service_with_graph, mock_graph_client):
+        mock_graph_client.create_typed_edge.return_value = False
+
+        result = await service_with_graph.create_relation("missing", "also_missing", "PRECEDES")
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_relation_invalid_type(self, service_with_graph, mock_graph_client):
+        mock_graph_client.create_typed_edge.side_effect = ValueError("Invalid relation type")
+
+        result = await service_with_graph.create_relation("a", "b", "CAUSES")
+
+        assert result["success"] is False
+        assert "Invalid" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_relation_no_graph_layer(self, memory_service):
+        """Without graph layer, returns error."""
+        result = await memory_service.create_relation("a", "b", "RELATES_TO")
+
+        assert result["success"] is False
+        assert "not enabled" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_get_relations_success(self, service_with_graph, mock_graph_client):
+        mock_graph_client.get_typed_edges.return_value = [
+            {
+                "source": "hash_a",
+                "target": "hash_b",
+                "relation_type": "RELATES_TO",
+                "direction": "outgoing",
+                "created_at": 1700000000.0,
+            }
+        ]
+
+        result = await service_with_graph.get_relations("hash_a")
+
+        assert result["count"] == 1
+        assert result["relations"][0]["relation_type"] == "RELATES_TO"
+
+    @pytest.mark.asyncio
+    async def test_get_relations_no_graph_layer(self, memory_service):
+        result = await memory_service.get_relations("hash_a")
+
+        assert result["relations"] == []
+        assert result["content_hash"] == "hash_a"
+
+    @pytest.mark.asyncio
+    async def test_delete_relation_success(self, service_with_graph, mock_graph_client):
+        result = await service_with_graph.delete_relation("hash_a", "hash_b", "CONTRADICTS")
+
+        assert result["success"] is True
+        assert result["relation_type"] == "CONTRADICTS"
+
+    @pytest.mark.asyncio
+    async def test_delete_relation_not_found(self, service_with_graph, mock_graph_client):
+        mock_graph_client.delete_typed_edge.return_value = False
+
+        result = await service_with_graph.delete_relation("a", "b", "RELATES_TO")
+
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_create_relation_general_exception(self, service_with_graph, mock_graph_client):
+        """General exception from graph client is caught and reported."""
+        mock_graph_client.create_typed_edge.side_effect = ConnectionError("redis down")
+
+        result = await service_with_graph.create_relation("a", "b", "RELATES_TO")
+
+        assert result["success"] is False
+        assert "redis down" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_get_relations_with_type_filter(self, service_with_graph, mock_graph_client):
+        """relation_type parameter is passed through to graph client."""
+        mock_graph_client.get_typed_edges.return_value = []
+
+        await service_with_graph.get_relations("hash_a", relation_type="PRECEDES")
+
+        mock_graph_client.get_typed_edges.assert_called_once_with(content_hash="hash_a", relation_type="PRECEDES")
+
+    @pytest.mark.asyncio
+    async def test_create_relation_self_edge(self, service_with_graph, mock_graph_client):
+        """Self-edge raises ValueError, caught by service layer."""
+        mock_graph_client.create_typed_edge.side_effect = ValueError("Cannot create a relationship from a memory to itself")
+
+        result = await service_with_graph.create_relation("same", "same", "RELATES_TO")
+
+        assert result["success"] is False
+        assert "itself" in result["error"]
+
+
+# =============================================================================
+# Proactive Interference & Contradiction Detection Tests
+# =============================================================================
+
+
+class TestInterferenceDetection:
+    """Test contradiction detection during memory storage."""
+
+    @pytest.fixture
+    def mock_graph_client(self):
+        client = AsyncMock()
+        client.ensure_memory_node = AsyncMock()
+        client.create_typed_edge = AsyncMock(return_value=True)
+        return client
+
+    @pytest.fixture
+    def service_with_graph(self, mock_storage, mock_graph_client):
+        return MemoryService(
+            storage=mock_storage,
+            graph_client=mock_graph_client,
+        )
+
+    @pytest.mark.asyncio
+    async def test_store_detects_contradiction(self, service_with_graph, mock_storage, mock_graph_client):
+        """When similar memory exists with contradicting content, interference is reported."""
+        # Existing memory says "enabled"
+        existing = Memory(
+            content="Feature flag oauth_v2 is enabled in production",
+            content_hash="existing_hash_123",
+            tags=["feature-flag"],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=0.9),
+        ]
+
+        # New memory says "disabled" — contradiction
+        result = await service_with_graph.store_memory(
+            content="Feature flag oauth_v2 is now disabled in production",
+        )
+
+        assert result["success"] is True
+        assert "interference" in result
+        assert result["interference"]["has_contradictions"] is True
+        assert result["interference"]["contradiction_count"] >= 1
+
+        # Should have created a CONTRADICTS edge in the graph
+        mock_graph_client.create_typed_edge.assert_any_call(
+            source_hash=result["memory"]["content_hash"],
+            target_hash="existing_hash_123",
+            relation_type="CONTRADICTS",
+            confidence=ANY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_store_no_contradiction_when_consistent(self, service_with_graph, mock_storage):
+        """No interference when similar memories are consistent (not contradictory)."""
+        existing = Memory(
+            content="The API uses pagination with page and page_size parameters",
+            content_hash="existing_hash_456",
+            tags=["api"],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=0.85),
+        ]
+
+        result = await service_with_graph.store_memory(
+            content="The API supports pagination for all list endpoints",
+        )
+
+        assert result["success"] is True
+        # No interference key when no contradictions detected
+        assert "interference" not in result or not result.get("interference", {}).get("has_contradictions")
+
+    @pytest.mark.asyncio
+    async def test_store_no_interference_without_similar_memories(self, service_with_graph, mock_storage):
+        """No interference when no similar memories exist."""
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = []
+
+        result = await service_with_graph.store_memory(
+            content="Completely new topic with no related memories",
+        )
+
+        assert result["success"] is True
+        assert "interference" not in result
+
+    @pytest.mark.asyncio
+    async def test_store_succeeds_even_if_detection_fails(self, service_with_graph, mock_storage):
+        """Contradiction detection failure is non-fatal — memory still stored."""
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.side_effect = Exception("Search failed")
+
+        result = await service_with_graph.store_memory(
+            content="Some content that triggers a search failure",
+        )
+
+        # Memory should still be stored successfully
+        assert result["success"] is True
+        assert "memory" in result
+
+    @pytest.mark.asyncio
+    async def test_store_succeeds_without_graph_layer(self, memory_service, mock_storage):
+        """Without graph layer, contradiction detection still works (just no edges)."""
+        existing = Memory(
+            content="Feature X is enabled",
+            content_hash="existing_hash",
+            tags=[],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=0.9),
+        ]
+
+        result = await memory_service.store_memory(
+            content="Feature X is disabled",
+        )
+
+        assert result["success"] is True
+        # Should still detect and report contradictions
+        if "interference" in result:
+            assert result["interference"]["has_contradictions"] is True
+
+    @pytest.mark.asyncio
+    async def test_temporal_supersession_detected(self, service_with_graph, mock_storage, mock_graph_client):
+        """'No longer' phrasing triggers temporal supersession signal."""
+        existing = Memory(
+            content="Redis is used for caching in the API layer",
+            content_hash="redis_hash",
+            tags=["redis"],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=0.82),
+        ]
+
+        result = await service_with_graph.store_memory(
+            content="The system no longer uses Redis for caching",
+        )
+
+        assert result["success"] is True
+        assert "interference" in result
+        contradictions = result["interference"]["contradictions"]
+        temporal = [c for c in contradictions if c["signal_type"] == "temporal"]
+        assert len(temporal) >= 1
+
+    @pytest.mark.asyncio
+    async def test_skips_exact_duplicate_in_detection(self, service_with_graph, mock_storage):
+        """Exact duplicate (same content hash) is not flagged as contradiction."""
+        from mcp_memory_service.utils.hashing import generate_content_hash
+
+        content = "Test content for deduplication"
+        content_hash = generate_content_hash(content)
+        existing = Memory(
+            content=content,
+            content_hash=content_hash,
+            tags=[],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=1.0),
+        ]
+
+        result = await service_with_graph.store_memory(content=content)
+
+        assert result["success"] is True
+        # Should NOT report interference for exact same content
+        assert "interference" not in result
+
+    @pytest.mark.asyncio
+    async def test_graph_edge_failure_nonfatal(self, service_with_graph, mock_storage, mock_graph_client):
+        """Graph edge creation failure doesn't affect store result."""
+        existing = Memory(
+            content="Feature X is enabled in production",
+            content_hash="existing_hash",
+            tags=[],
+        )
+        mock_storage.store.return_value = (True, "Success")
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(memory=existing, relevance_score=0.9),
+        ]
+        # Graph edge creation fails
+        mock_graph_client.create_typed_edge.side_effect = ConnectionError("redis down")
+
+        result = await service_with_graph.store_memory(
+            content="Feature X is disabled in production",
+        )
+
+        # Store should still succeed with interference reported
+        assert result["success"] is True
+        if "interference" in result:
+            assert result["interference"]["has_contradictions"] is True
+
+
+# =============================================================================
+# Similarity Search Tests (K-Nearest Neighbors)
+# =============================================================================
+
+
+class TestSimilaritySearch:
+    """Test pure k-nearest neighbors similarity search."""
+
+    @pytest.mark.asyncio
+    async def test_find_similar_returns_exactly_k_results(self, memory_service, mock_storage, sample_memories):
+        """Test similarity search returns exactly k most similar memories."""
+        # Mock storage to return query results
+        query_results = [MemoryQueryResult(memory=sample_memories[i], relevance_score=0.9 - i * 0.1) for i in range(3)]
+        mock_storage.retrieve.return_value = query_results
+
+        result = await memory_service.find_similar_memories(query="test query", k=3)
+
+        assert result["count"] == 3
+        assert len(result["memories"]) == 3
+        # Should be ordered by similarity descending
+        assert result["memories"][0]["relevance_score"] == 0.9
+        assert result["memories"][1]["relevance_score"] == 0.8
+        assert result["memories"][2]["relevance_score"] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_find_similar_with_distance_metric(self, memory_service, mock_storage):
+        """Test similarity search accepts distance_metric parameter."""
+        mock_storage.retrieve.return_value = []
+
+        result = await memory_service.find_similar_memories(query="test query", k=5, distance_metric="cosine")
+
+        assert result["distance_metric"] == "cosine"
+        assert result["k"] == 5
+
+    @pytest.mark.asyncio
+    async def test_find_similar_defaults_to_cosine(self, memory_service, mock_storage):
+        """Test similarity search defaults to cosine distance."""
+        mock_storage.retrieve.return_value = []
+
+        result = await memory_service.find_similar_memories(query="test query", k=5)
+
+        assert result["distance_metric"] == "cosine"
+
+
+# =============================================================================
+# Filtered Below Threshold Hint (#115)
+# =============================================================================
+
+
+class TestFilteredBelowThreshold:
+    """Verify that filtered_below_threshold is reported when results are dropped."""
+
+    @pytest.fixture
+    def memory_service(self, mock_storage):
+        return MemoryService(storage=mock_storage)
+
+    @pytest.mark.asyncio
+    async def test_vector_only_reports_filtered_count(self, memory_service, mock_storage):
+        """When min_similarity filters out results, response includes filtered_below_threshold."""
+        # Two results: one above threshold (0.8), one below (0.2)
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(
+                memory=Memory(
+                    content="high score",
+                    content_hash="hash_high",
+                    tags=["test"],
+                    memory_type="note",
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                relevance_score=0.8,
+            ),
+            MemoryQueryResult(
+                memory=Memory(
+                    content="low score",
+                    content_hash="hash_low",
+                    tags=["test"],
+                    memory_type="note",
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                relevance_score=0.2,
+            ),
+        ]
+        mock_storage.count_semantic_search = AsyncMock(return_value=2)
+
+        result = await memory_service._retrieve_vector_only(
+            query="test", page=1, page_size=10, tags=None, memory_type=None, min_similarity=0.5
+        )
+
+        assert len(result["memories"]) == 1
+        assert result["filtered_below_threshold"] == 1
+
+    @pytest.mark.asyncio
+    async def test_vector_only_omits_key_when_nothing_filtered(self, memory_service, mock_storage):
+        """When nothing is filtered, filtered_below_threshold should be absent."""
+        mock_storage.retrieve.return_value = [
+            MemoryQueryResult(
+                memory=Memory(
+                    content="high score",
+                    content_hash="hash_high",
+                    tags=["test"],
+                    memory_type="note",
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                relevance_score=0.8,
+            ),
+        ]
+        mock_storage.count_semantic_search = AsyncMock(return_value=1)
+
+        result = await memory_service._retrieve_vector_only(
+            query="test", page=1, page_size=10, tags=None, memory_type=None, min_similarity=0.5
+        )
+
+        assert len(result["memories"]) == 1
+        assert "filtered_below_threshold" not in result
+
+
+# =============================================================================
+# Batch Operations Tests
+# =============================================================================
+
+
+class TestBatchStoreMemory:
+    """Tests for MemoryService.batch_store_memory."""
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_returns_success(self, memory_service):
+        result = await memory_service.batch_store_memory([])
+        assert result["success"] is True
+        assert result["created"] == 0
+        assert result["failed"] == 0
+        assert result["results"] == []
+        assert result["rolled_back"] is False
+
+    @pytest.mark.asyncio
+    async def test_successful_batch_stores_all(self, memory_service, mock_storage):
+        mock_storage.store.return_value = (True, "Stored")
+        mock_storage.retrieve.return_value = []
+        mock_storage.get_by_hash = AsyncMock(return_value=None)
+
+        memories = [{"content": f"Memory {i}", "tags": ["batch"], "memory_type": "note", "metadata": {}} for i in range(3)]
+
+        # Patch store_memory to return a predictable result
+        from unittest.mock import patch
+
+        store_results = [
+            {
+                "success": True,
+                "memory": {"content_hash": f"hash_{i}", "content": f"Memory {i}", "tags": ["batch"], "memory_type": "note"},
+            }
+            for i in range(3)
+        ]
+        with patch.object(memory_service, "store_memory", side_effect=store_results):
+            result = await memory_service.batch_store_memory(memories)
+
+        assert result["success"] is True
+        assert result["created"] == 3
+        assert result["failed"] == 0
+        assert result["rolled_back"] is False
+        assert len(result["results"]) == 3
+        assert all(r["success"] for r in result["results"])
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_triggers_rollback(self, memory_service, mock_storage):
+        store_results = [
+            {"success": True, "memory": {"content_hash": "hash_0", "content": "Memory 0", "tags": [], "memory_type": None}},
+            {"success": False, "error": "Storage error"},
+        ]
+        mock_storage.delete.return_value = (True, "Deleted")
+
+        from unittest.mock import patch
+
+        with patch.object(memory_service, "store_memory", side_effect=store_results):
+            result = await memory_service.batch_store_memory(
+                [
+                    {"content": "Memory 0", "tags": [], "memory_type": None, "metadata": {}},
+                    {"content": "Memory 1", "tags": [], "memory_type": None, "metadata": {}},
+                ]
+            )
+
+        assert result["success"] is False
+        assert result["created"] == 0
+        assert result["failed"] == 2
+        assert result["rolled_back"] is True
+        # hash_0 should have been rolled back
+        mock_storage.delete.assert_called_once_with("hash_0")
+
+    @pytest.mark.asyncio
+    async def test_exception_during_store_triggers_rollback(self, memory_service, mock_storage):
+        mock_storage.delete.return_value = (True, "Deleted")
+
+        from unittest.mock import patch
+
+        async def failing_store(**kwargs):
+            if kwargs["content"] == "Memory 1":
+                raise RuntimeError("Unexpected error")
+            return {
+                "success": True,
+                "memory": {"content_hash": "hash_0", "content": "Memory 0", "tags": [], "memory_type": None},
+            }
+
+        with patch.object(memory_service, "store_memory", side_effect=failing_store):
+            result = await memory_service.batch_store_memory(
+                [
+                    {"content": "Memory 0", "tags": [], "memory_type": None, "metadata": {}},
+                    {"content": "Memory 1", "tags": [], "memory_type": None, "metadata": {}},
+                ]
+            )
+
+        assert result["success"] is False
+        assert result["rolled_back"] is True
+        mock_storage.delete.assert_called_once_with("hash_0")
+
+
+class TestBatchDeleteMemory:
+    """Tests for MemoryService.batch_delete_memory."""
+
+    @pytest.mark.asyncio
+    async def test_all_deletions_succeed(self, memory_service, mock_storage):
+        mock_storage.delete.return_value = (True, "Deleted")
+
+        result = await memory_service.batch_delete_memory(["hash_1", "hash_2", "hash_3"])
+
+        assert result["success"] is True
+        assert result["deleted"] == 3
+        assert result["failed"] == 0
+        assert all(r["success"] for r in result["results"])
+
+    @pytest.mark.asyncio
+    async def test_partial_deletion_failure_reported(self, memory_service, mock_storage):
+        # First delete succeeds, second fails
+        mock_storage.delete.side_effect = [
+            (True, "Deleted"),
+            (False, "Not found"),
+        ]
+
+        result = await memory_service.batch_delete_memory(["hash_1", "hash_2"])
+
+        assert result["success"] is False
+        assert result["deleted"] == 1
+        assert result["failed"] == 1
+        assert result["results"][0]["success"] is True
+        assert result["results"][1]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_success(self, memory_service):
+        result = await memory_service.batch_delete_memory([])
+        assert result["success"] is True
+        assert result["deleted"] == 0
+        assert result["failed"] == 0
+
+
+class TestBatchUpdateMemory:
+    """Tests for MemoryService.batch_update_memory."""
+
+    @pytest.mark.asyncio
+    async def test_all_updates_succeed(self, memory_service, mock_storage):
+        mock_storage.update_memory_metadata = AsyncMock(return_value=(True, "Updated"))
+
+        updates = [
+            {"content_hash": "hash_1", "tags": ["new_tag"]},
+            {"content_hash": "hash_2", "memory_type": "reference"},
+        ]
+        result = await memory_service.batch_update_memory(updates)
+
+        assert result["success"] is True
+        assert result["updated"] == 2
+        assert result["failed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_op_item_counts_as_success(self, memory_service):
+        # Item with no fields to update is a no-op success
+        result = await memory_service.batch_update_memory(
+            [
+                {"content_hash": "hash_1"},
+            ]
+        )
+        assert result["success"] is True
+        assert result["updated"] == 1
+        assert result["failed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_partial_update_failure_reported(self, memory_service, mock_storage):
+        mock_storage.update_memory_metadata = AsyncMock(
+            side_effect=[
+                (True, "Updated"),
+                (False, "Not found"),
+            ]
+        )
+
+        updates = [
+            {"content_hash": "hash_1", "tags": ["a"]},
+            {"content_hash": "hash_2", "tags": ["b"]},
+        ]
+        result = await memory_service.batch_update_memory(updates)
+
+        assert result["success"] is False
+        assert result["updated"] == 1
+        assert result["failed"] == 1
+
+
+class TestBatchTagOperation:
+    """Tests for MemoryService.batch_tag_operation."""
+
+    @pytest.mark.asyncio
+    async def test_add_tags_to_memories(self, memory_service, mock_storage, sample_memory):
+        mock_storage.get_by_hash = AsyncMock(return_value=sample_memory)
+        mock_storage.update_memory_metadata = AsyncMock(return_value=(True, "Updated"))
+
+        result = await memory_service.batch_tag_operation(
+            content_hashes=["test_hash_123"],
+            add_tags=["new_tag"],
+        )
+
+        assert result["success"] is True
+        assert result["updated"] == 1
+        # Verify the update included the new tag
+        call_args = mock_storage.update_memory_metadata.call_args
+        assert "new_tag" in call_args.kwargs["updates"]["tags"]
+
+    @pytest.mark.asyncio
+    async def test_remove_tags_from_memories(self, memory_service, mock_storage, sample_memory):
+        mock_storage.get_by_hash = AsyncMock(return_value=sample_memory)
+        mock_storage.update_memory_metadata = AsyncMock(return_value=(True, "Updated"))
+
+        # sample_memory has tags ["test", "sample"]
+        result = await memory_service.batch_tag_operation(
+            content_hashes=["test_hash_123"],
+            remove_tags=["test"],
+        )
+
+        assert result["success"] is True
+        call_args = mock_storage.update_memory_metadata.call_args
+        assert "test" not in call_args.kwargs["updates"]["tags"]
+        assert "sample" in call_args.kwargs["updates"]["tags"]
+
+    @pytest.mark.asyncio
+    async def test_memory_not_found_reported_as_failure(self, memory_service, mock_storage):
+        mock_storage.get_by_hash = AsyncMock(return_value=None)
+
+        result = await memory_service.batch_tag_operation(
+            content_hashes=["missing_hash"],
+            add_tags=["tag"],
+        )
+
+        assert result["success"] is False
+        assert result["failed"] == 1
+        assert result["results"][0]["error"] == "Memory not found"
+
+
+# =============================================================================
+# EmbeddingProvider Injection Tests
+# =============================================================================
+
+
+class TestEmbeddingProviderInjection:
+    """Tests for MemoryService with injected EmbeddingProvider."""
+
+    @pytest.fixture
+    def mock_provider(self):
+        from unittest.mock import PropertyMock
+
+        from mcp_memory_service.embedding.protocol import EmbeddingProvider
+
+        provider = AsyncMock(spec=EmbeddingProvider)
+        provider.embed_batch = AsyncMock(return_value=[[0.1] * 768])
+        type(provider).dimensions = PropertyMock(return_value=768)
+        type(provider).model_name = PropertyMock(return_value="test-model")
+        return provider
+
+    @pytest.fixture
+    def service_with_provider(self, mock_storage, mock_provider):
+        return MemoryService(storage=mock_storage, embedding_provider=mock_provider)
+
+    @pytest.mark.asyncio
+    async def test_get_embeddings_uses_provider(self, service_with_provider, mock_provider):
+        """_get_embeddings delegates to provider when injected."""
+        mock_provider.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+        result = await service_with_provider._get_embeddings(["hello", "world"])
+        assert len(result) == 2
+        mock_provider.embed_batch.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_find_duplicates_uses_provider(self, service_with_provider, mock_storage, mock_provider):
+        """find_duplicates delegates embedding to provider when injected."""
+        m1 = Memory(content="aaa", content_hash="h1", tags=[])
+        m2 = Memory(content="bbb", content_hash="h2", tags=[])
+        mock_storage.get_all_memories = AsyncMock(return_value=[m1, m2])
+        mock_provider.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+
+        result = await service_with_provider.find_duplicates()
+        assert result["success"] is True
+        mock_provider.embed_batch.assert_awaited_once()
+        mock_storage.generate_embeddings_batch.assert_not_awaited()

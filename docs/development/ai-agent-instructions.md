@@ -8,22 +8,12 @@ MCP Memory Service implements the Model Context Protocol (MCP) to provide semant
 
 ## Setup Commands
 
-**⚠️ CRITICAL FOR DEVELOPMENT**: Always use editable install to avoid stale package issues:
-
 ```bash
-# Install dependencies in EDITABLE mode (REQUIRED for development)
-pip install -e .
+# Install dependencies (platform-aware)
+python install.py
 
-# Or with uv (faster, also editable)
-uv pip install -e .
-
-# Verify editable install (critical check!)
-pip show mcp-memory-service | grep Location
-# Expected: Location: /path/to/mcp-memory-service/src
-# NOT: Location: /path/to/venv/lib/python3.x/site-packages
-
-# Verify version consistency (detects stale venv)
-python scripts/validation/check_dev_setup.py
+# Alternative: UV installation (faster)
+uv sync
 
 # Start development server
 uv run memory server
@@ -31,13 +21,9 @@ uv run memory server
 # Run with inspector for debugging
 npx @modelcontextprotocol/inspector uv run memory server
 
-# Start HTTP API server (dashboard at http://localhost:8000)
-uv run python scripts/server/run_http_server.py
+# Start HTTP API server (dashboard at https://localhost:8443)
+uv run memory server --http --port 8443
 ```
-
-**Why `-e` flag matters**: MCP servers load from `site-packages`, not source files. Without editable install, source code changes won't take effect until you reinstall. System restart won't help - it just relaunches with the same stale package.
-
-**Common symptom**: Code shows v8.23.0 but server reports v8.5.3 → Run `pip install -e . --force-reinstall`
 
 ## Testing
 

@@ -25,10 +25,10 @@ Tests cover:
 
 import pytest
 from src.mcp_memory_service.utils.content_splitter import (
-    split_content,
+    _find_best_split_point,
     estimate_chunks_needed,
+    split_content,
     validate_chunk_lengths,
-    _find_best_split_point
 )
 
 
@@ -58,41 +58,39 @@ class TestContentSplitter:
     def test_split_preserves_paragraphs(self):
         """Test that paragraph boundaries are preferred for splitting."""
         content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
-        # Fix: overlap must be smaller than max_length
         chunks = split_content(content, max_length=30, preserve_boundaries=True, overlap=10)
 
         # Should split at paragraph boundaries
         assert len(chunks) >= 2
         # Each chunk should end cleanly (no mid-paragraph cuts)
         for chunk in chunks[:-1]:  # Check all but last chunk
-            assert chunk.strip().endswith('.') or '\n\n' in chunk
+            assert chunk.strip().endswith(".") or "\n\n" in chunk
 
     def test_split_preserves_sentences(self):
         """Test that sentence boundaries are preferred when paragraphs don't fit."""
         content = "First sentence. Second sentence. Third sentence. Fourth sentence."
-        # Fix: overlap must be smaller than max_length
-        chunks = split_content(content, max_length=40, preserve_boundaries=True, overlap=15)
+        chunks = split_content(content, max_length=40, preserve_boundaries=True, overlap=10)
 
         # Should split at sentence boundaries
         assert len(chunks) >= 2
         # Most chunks should end with period
-        period_endings = sum(1 for chunk in chunks if chunk.strip().endswith('.'))
+        period_endings = sum(1 for chunk in chunks if chunk.strip().endswith("."))
         assert period_endings >= len(chunks) - 1
 
     def test_split_preserves_words(self):
         """Test that word boundaries are preferred when sentences don't fit."""
         content = "word1 word2 word3 word4 word5 word6 word7 word8"
-        # Fix: overlap must be smaller than max_length
-        chunks = split_content(content, max_length=25, preserve_boundaries=True, overlap=8)
+        chunks = split_content(content, max_length=25, preserve_boundaries=True, overlap=5)
 
         # Should split at word boundaries
         assert len(chunks) >= 2
-        # Each chunk should contain complete words (not cut mid-word)
+        # All words should be complete (not partial)
         for chunk in chunks:
-            # Check that chunk doesn't start or end with partial word markers
-            # A clean word boundary split will have spaces between words
+            # Check that all words in chunk are complete (not cut in middle)
             words = chunk.strip().split()
-            assert len(words) >= 1, "Each chunk should contain at least one complete word"
+            # Each word should be from the original content
+            for word in words:
+                assert word in content.split(), f"Word '{word}' appears cut or invalid"
 
     def test_split_overlap(self):
         """Test that chunks have proper overlap for context."""
@@ -104,7 +102,7 @@ class TestContentSplitter:
         for i in range(len(chunks) - 1):
             # The next chunk should contain some content from the end of current chunk
             current_end = chunks[i][-20:]
-            assert any(word in chunks[i+1] for word in current_end.split()[:3])
+            assert any(word in chunks[i + 1] for word in current_end.split()[:3])
 
     def test_estimate_chunks_needed(self):
         """Test chunk estimation function."""
@@ -137,15 +135,15 @@ class TestContentSplitter:
         split_point = _find_best_split_point(text, max_length=25)
 
         # Should split at first paragraph break
-        assert text[split_point-2:split_point] == '\n\n'
+        assert text[split_point - 2 : split_point] == "\n\n"
 
     def test_find_best_split_point_sentence(self):
         """Test that sentence boundaries are used when no paragraph breaks."""
         text = "First sentence. Second sentence. Third sentence."
         split_point = _find_best_split_point(text, max_length=30)
 
-        # Should split at sentence boundary (check if split happens after a period)
-        assert text[split_point-1:split_point+1] in ['. ', '.\n', '.'] or text[:split_point].rstrip().endswith('.')
+        # Should split at sentence boundary - text before split should end with period
+        assert text[:split_point].rstrip().endswith(".")
 
     def test_split_empty_content(self):
         """Test handling of empty content."""
@@ -178,88 +176,29 @@ def function_three():
         # Each chunk should contain complete functions ideally
         for chunk in chunks:
             # Count function definitions
-            if 'def ' in chunk:
+            if "def " in chunk:
                 # If it has a def, it should have a return (complete function)
-                assert 'return' in chunk or chunk == chunks[-1]
-
-
-class TestBackendLimits:
-    """Test backend-specific content length limits."""
-
-    def test_cloudflare_limit(self):
-        """Test that Cloudflare backend uses config constant."""
-        from src.mcp_memory_service.storage.cloudflare import CloudflareStorage
-        from src.mcp_memory_service.config import CLOUDFLARE_MAX_CONTENT_LENGTH
-
-        # Verify the class constant matches config
-        assert CloudflareStorage._MAX_CONTENT_LENGTH == CLOUDFLARE_MAX_CONTENT_LENGTH
-
-    def test_sqlitevec_unlimited(self):
-        """Test that SQLite-vec backend uses config constant."""
-        from src.mcp_memory_service.storage.sqlite_vec import SqliteVecMemoryStorage
-        from src.mcp_memory_service.config import SQLITEVEC_MAX_CONTENT_LENGTH
-
-        # Create a mock instance to check property
-        import tempfile
-        import os
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            storage = SqliteVecMemoryStorage(db_path=db_path)
-
-            # Should return configured value (default: None/unlimited)
-            assert storage.max_content_length == SQLITEVEC_MAX_CONTENT_LENGTH
-            assert storage.supports_chunking is True
-
-    def test_hybrid_follows_config(self):
-        """Test that Hybrid backend uses config constant."""
-        from src.mcp_memory_service.storage.hybrid import HybridMemoryStorage
-        from src.mcp_memory_service.config import HYBRID_MAX_CONTENT_LENGTH
-        import tempfile
-        import os
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            storage = HybridMemoryStorage(
-                sqlite_db_path=db_path,
-                cloudflare_config=None  # No cloud sync for this test
-            )
-
-            # Should match configured hybrid limit
-            assert storage.max_content_length == HYBRID_MAX_CONTENT_LENGTH
-            assert storage.supports_chunking is True
+                assert "return" in chunk or chunk == chunks[-1]
 
 
 class TestConfigurationConstants:
     """Test configuration constants for content limits."""
 
     def test_config_constants_exist(self):
-        """Test that all content limit constants are defined."""
+        """Test that content splitting constants are defined."""
         from src.mcp_memory_service.config import (
-            CLOUDFLARE_MAX_CONTENT_LENGTH,
-            SQLITEVEC_MAX_CONTENT_LENGTH,
-            HYBRID_MAX_CONTENT_LENGTH,
-            ENABLE_AUTO_SPLIT,
+            CONTENT_PRESERVE_BOUNDARIES,
             CONTENT_SPLIT_OVERLAP,
-            CONTENT_PRESERVE_BOUNDARIES
+            ENABLE_AUTO_SPLIT,
         )
 
-        assert CLOUDFLARE_MAX_CONTENT_LENGTH == 800
-        assert SQLITEVEC_MAX_CONTENT_LENGTH is None  # Unlimited
-        assert HYBRID_MAX_CONTENT_LENGTH == CLOUDFLARE_MAX_CONTENT_LENGTH
         assert isinstance(ENABLE_AUTO_SPLIT, bool)
         assert isinstance(CONTENT_SPLIT_OVERLAP, int)
         assert isinstance(CONTENT_PRESERVE_BOUNDARIES, bool)
 
     def test_config_validation(self):
         """Test that config values are sensible."""
-        from src.mcp_memory_service.config import (
-            CLOUDFLARE_MAX_CONTENT_LENGTH,
-            CONTENT_SPLIT_OVERLAP
-        )
-
-        # Limits should be positive
-        assert CLOUDFLARE_MAX_CONTENT_LENGTH > 0
+        from src.mcp_memory_service.config import CONTENT_SPLIT_OVERLAP
 
         # Overlap should be reasonable
         assert 0 <= CONTENT_SPLIT_OVERLAP <= 500
